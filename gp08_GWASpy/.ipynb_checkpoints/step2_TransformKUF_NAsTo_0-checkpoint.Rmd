@@ -1,0 +1,327 @@
+---
+title: "transform_kuf_nas"
+author: "Nico Valencia"
+date: "2025-10-05"
+output: html_document
+---
+
+The goal of this script is to transform NAs in Khat Use Frequency to 0 if their assist_khat value = 0. These new recoded "0" values correspond to people who have never used in their life. This differentiates from the individuals who "Have not used in the past 3 months" (assist_khat_amt = 1).
+  - In this process, one extra sample at UCT was dropped due to not passing the aforementioned argument (i.e., still remained an NA, so we dropped it)
+
+I also added a section on getting stacked barplots for distribution of khat use and khat use frequency across each site.
+
+```{r}
+# Load library
+library(ggplot2)
+library(dplyr)
+library(scales)
+```
+
+```{r}
+# read in phenotype files
+w_site_Uganda_pheno_noNA <- read.csv("~/Desktop/work/khat_gwas/script_referenced_files/gp08_covar_adj/w_site_Uganda_pheno_noNA.txt", sep="")
+
+w_site_AAU_pheno_noNA <- read.csv("~/Desktop/work/khat_gwas/script_referenced_files/gp08_covar_adj/w_site_AAU_pheno_noNA.txt", sep="")
+
+w_site_UCT_pheno_noNA <- read.csv("~/Desktop/work/khat_gwas/script_referenced_files/gp08_covar_adj/w_site_UCT_pheno.txt", sep="")
+
+w_site_KEMRI_pheno_noNA <- read.csv("~/Desktop/work/khat_gwas/script_referenced_files/gp08_covar_adj/w_site_KEMRI_pheno.txt", sep="")
+
+w_site_Moi_pheno_noNA <- read.csv("~/Desktop/work/khat_gwas/script_referenced_files/gp08_covar_adj/w_site_Moi_pheno.txt", sep="")
+
+```
+
+
+```{r}
+# Uganda
+w_site_Uganda_pheno_noNA$assist_khat_amt[
+  w_site_Uganda_pheno_noNA$assist_khat == 0 & is.na(w_site_Uganda_pheno_noNA$assist_khat_amt)
+] <- 0
+
+# AAU
+w_site_AAU_pheno_noNA$assist_khat_amt[
+  w_site_AAU_pheno_noNA$assist_khat == 0 & is.na(w_site_AAU_pheno_noNA$assist_khat_amt)
+] <- 0
+
+# UCT
+w_site_UCT_pheno_noNA$assist_khat_amt[
+  w_site_UCT_pheno_noNA$assist_khat == 0 & is.na(w_site_UCT_pheno_noNA$assist_khat_amt)
+] <- 0
+
+# KEMRI
+w_site_KEMRI_pheno_noNA$assist_khat_amt[
+  w_site_KEMRI_pheno_noNA$assist_khat == 0 & is.na(w_site_KEMRI_pheno_noNA$assist_khat_amt)
+] <- 0
+
+# Moi
+w_site_Moi_pheno_noNA$assist_khat_amt[
+  w_site_Moi_pheno_noNA$assist_khat == 0 & is.na(w_site_Moi_pheno_noNA$assist_khat_amt)
+] <- 0
+
+```
+
+```{r}
+# show distribution of khat use frequency
+show_dist <- function(df, site_name) {
+  cat("\n---", site_name, "---\n")
+  print(table(df$assist_khat_amt, useNA = "ifany"))
+}
+
+# print value distributions for each site
+show_dist(w_site_Uganda_pheno_noNA, "Uganda")
+show_dist(w_site_AAU_pheno_noNA, "AAU")
+show_dist(w_site_UCT_pheno_noNA, "UCT")
+show_dist(w_site_KEMRI_pheno_noNA, "KEMRI")
+show_dist(w_site_Moi_pheno_noNA, "Moi")
+
+```
+
+
+```{r}
+# remove any NAs samples w/ NAs
+
+w_site_Uganda_pheno_noNA <- subset(w_site_Uganda_pheno_noNA, !is.na(assist_khat_amt))
+w_site_AAU_pheno_noNA    <- subset(w_site_AAU_pheno_noNA,    !is.na(assist_khat_amt))
+w_site_UCT_pheno_noNA    <- subset(w_site_UCT_pheno_noNA,    !is.na(assist_khat_amt))
+w_site_KEMRI_pheno_noNA  <- subset(w_site_KEMRI_pheno_noNA,  !is.na(assist_khat_amt))
+w_site_Moi_pheno_noNA    <- subset(w_site_Moi_pheno_noNA,    !is.na(assist_khat_amt))
+
+# show distribution of khat use frequency
+show_dist <- function(df, site_name) {
+  cat("\n---", site_name, "---\n")
+  print(table(df$assist_khat_amt, useNA = "ifany"))
+}
+
+# print updated distributions
+show_dist(w_site_Uganda_pheno_noNA, "Uganda")
+show_dist(w_site_AAU_pheno_noNA, "AAU")
+show_dist(w_site_UCT_pheno_noNA, "UCT")
+show_dist(w_site_KEMRI_pheno_noNA, "KEMRI")
+show_dist(w_site_Moi_pheno_noNA, "Moi")
+
+
+```
+
+```{r}
+### MAKE STACKED BARPLOT FOR KHAT USE FREQUENCY
+
+# Combine all sites into one dataframe
+w_site_Uganda_pheno_noNA$site <- "Uganda"
+w_site_AAU_pheno_noNA$site    <- "Ethiopia"
+w_site_UCT_pheno_noNA$site    <- "South Africa"
+w_site_KEMRI_pheno_noNA$site  <- "KEMRI"
+w_site_Moi_pheno_noNA$site    <- "Moi"
+
+combined_df <- bind_rows(
+  w_site_Uganda_pheno_noNA,
+  w_site_AAU_pheno_noNA,
+  w_site_UCT_pheno_noNA,
+  w_site_KEMRI_pheno_noNA,
+  w_site_Moi_pheno_noNA
+)
+
+# Convert to numeric if needed
+combined_df$assist_khat_amt <- as.numeric(as.character(combined_df$assist_khat_amt))
+
+# Map numeric codes to descriptive labels
+label_map <- c(
+  "0" = "Never Used",
+  "1" = "Have not Used",
+  "2" = "Once or Twice",
+  "3" = "Monthly",
+  "4" = "Weekly",
+  "5" = "Daily or Almost Daily"
+)
+
+combined_df$assist_khat_amt_label <- factor(
+  label_map[as.character(combined_df$assist_khat_amt)],
+  levels = c(
+    "Daily or Almost Daily",
+    "Weekly",
+    "Monthly",
+    "Once or Twice",
+    "Have not Used",
+    "Never Used"
+  ),
+  ordered = TRUE
+)
+
+# Summarize counts
+count_df <- combined_df %>%
+  group_by(site, assist_khat_amt_label) %>%
+  summarise(count = n(), .groups = "drop")
+
+# Bright blue palette (darker = higher frequency)
+levs <- levels(count_df$assist_khat_amt_label)
+pal  <- setNames(colorRampPalette(c("#1565C0", "#BBDEFB"))(length(levs)), levs)
+
+# Plot (will stack 5→0 visually if you keep position_stack(reverse = TRUE))
+ggplot(count_df, aes(x = site, y = count, fill = assist_khat_amt_label)) +
+  geom_bar(stat = "identity", color = "white", position = position_stack(reverse = TRUE)) +
+  scale_fill_manual(
+    values = pal,
+    name = "Usage Past 3 Months",
+    guide = guide_legend(reverse = TRUE)
+  ) +
+  labs(
+    title = "Distribution of Khat Use Frequency in 3 Months",
+    x = "Study Site",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right",
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+```{r}
+## --- Percent labels for "Have used" vs "Never Used" ---
+site_totals <- count_df %>%
+  group_by(site) %>%
+  summarise(total = sum(count), .groups = "drop")
+
+never_counts <- count_df %>%
+  filter(assist_khat_amt_label == "Never Used") %>%
+  select(site, never_count = count)
+
+labels_df <- site_totals %>%
+  left_join(never_counts, by = "site") %>%
+  mutate(
+    never_count = dplyr::coalesce(never_count, 0L),
+    have_count  = total - never_count,
+    label_never = percent(never_count / total, accuracy = 0.1),
+    label_have  = percent(have_count  / total, accuracy = 0.1),
+    y_never     = total,       # top of full bar (Never Used segment)
+    y_have      = have_count   # boundary between Have used and Never Used
+  )
+```
+
+```{r}
+
+# Combine all site data
+w_site_Uganda_pheno_noNA$site <- "Uganda"
+w_site_AAU_pheno_noNA$site    <- "Ethiopia"
+w_site_UCT_pheno_noNA$site    <- "South Africa"
+w_site_KEMRI_pheno_noNA$site  <- "KEMRI"
+w_site_Moi_pheno_noNA$site    <- "Moi"
+
+combined_df <- bind_rows(
+  w_site_Uganda_pheno_noNA,
+  w_site_AAU_pheno_noNA,
+  w_site_UCT_pheno_noNA,
+  w_site_KEMRI_pheno_noNA,
+  w_site_Moi_pheno_noNA
+)
+
+# Recode assist_khat (0/1) to descriptive labels
+combined_df <- combined_df %>%
+  mutate(
+    assist_khat_label = factor(
+      ifelse(assist_khat == 1, "Have used", "Never used"),
+      levels = c("Have used", "Never used")
+    )
+  )
+
+# Summarize counts and percentages
+count_df <- combined_df %>%
+  group_by(site, assist_khat_label) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(site) %>%
+  mutate(
+    total = sum(count),
+    percent = 100 * count / total
+  ) %>%
+  ungroup() 
+
+# Compute y positions for labels
+label_df <- count_df %>%
+  group_by(site) %>%
+  arrange(site, assist_khat_label) %>%
+  mutate(
+    cum_count = cumsum(count),
+    y_label = case_when(
+      assist_khat_label == "Have used" ~ cum_count + 250,   
+      assist_khat_label == "Never used" ~ cum_count + 250   
+    )
+  )
+
+
+# Define colors
+pal <- c("Have used" = "#1565C0", "Never used" = "#BBDEFB")
+
+# --- Plot ---
+ggplot(count_df, aes(x = site, y = count, fill = assist_khat_label)) +
+  geom_bar(stat = "identity", color = "white", position = position_stack(reverse = TRUE)) +
+  # Add percentage labels (now with explicit x mapping)
+  geom_text(
+    data = label_df,
+    aes(x = site, y = y_label, label = paste0(round(percent, 1), "%")),
+    inherit.aes = FALSE,
+    size = 4,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = pal,
+    name = "Khat Use",
+    guide = guide_legend(reverse = TRUE)
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title = "Distribution of Khat Use by Site",
+    x = "Study Site",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right",
+    panel.grid.minor = element_blank()
+  )
+
+
+```
+
+
+```{r}
+
+# export files
+# Define output directory
+out_dir <- "~/Desktop/work/khat_gwas/script_referenced_files/gp08_covar_adj/"
+
+# Write each dataframe to file
+write.table(
+  w_site_Uganda_pheno_noNA,
+  file = paste0(out_dir, "kuf_NAs0_w_site_Uganda_pheno.txt"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+
+write.table(
+  w_site_AAU_pheno_noNA,
+  file = paste0(out_dir, "kuf_NAs0_w_site_AAU_pheno.txt"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+
+write.table(
+  w_site_UCT_pheno_noNA,
+  file = paste0(out_dir, "kuf_NAs0_w_site_UCT_pheno.txt"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+
+write.table(
+  w_site_KEMRI_pheno_noNA,
+  file = paste0(out_dir, "kuf_NAs0_w_site_KEMRI_pheno.txt"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+
+write.table(
+  w_site_Moi_pheno_noNA,
+  file = paste0(out_dir, "kuf_NAs0_w_site_Moi_pheno.txt"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+
+```
+
+
