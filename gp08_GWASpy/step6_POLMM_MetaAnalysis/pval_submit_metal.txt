@@ -1,0 +1,23 @@
+SCHEME SAMPLESIZE
+
+SEPARATOR TAB
+COLUMNCOUNTING LENIENT
+
+MARKER SNPID
+ALLELE A1 A2
+EFFECT beta
+STDERR SE
+PVALUE pval.spa
+WEIGHT N_SITE
+AVERAGEFREQ ON
+MINMAXFREQ ON
+
+PROCESS cleaned_assoc_AAU_adjusted_filters
+PROCESS cleaned_assoc_KEMRI_adjusted_filters
+PROCESS cleaned_assoc_Moi_adjusted_filters
+PROCESS cleaned_assoc_Uganda_adjusted_filters
+
+OUTFILE pval_meta_results .tbl
+
+ANALYZE
+QUIT

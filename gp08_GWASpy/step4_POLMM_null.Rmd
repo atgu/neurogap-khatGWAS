@@ -1,0 +1,174 @@
+### Made by Nico Matthew S. Valencia
+
+```{r}
+# this process does not output a dense grm fyi. POLMM calculates it, uses it for making the null model
+  # then discards it
+```
+
+```{r}
+library(POLMM)  
+library(data.table)
+```
+
+```{r}
+## ========= 1) ONE-WORD SITE SELECTOR =======================================
+SITE <- "AAU"   # or "Uganda", "Moi", "KEMRI", "UCT", "ALL"
+
+
+```
+
+```{r}
+## ========= 2) PATHS (edit if you move files) ===============================
+plink_dir <- "/Users/nvalenci/Desktop/work/khat_gwas/script_referenced_files/gp08_covar_adj/by_site_plink_files"
+pheno_dir <- "/Users/nvalenci/Desktop/work/khat_gwas/script_referenced_files/gp08_covar_adj"
+out_dir   <- "/Users/nvalenci/Desktop/work/khat_gwas/plink_by_site_null"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+```
+
+```{r}
+## ========= 3) SITE -> PHENO & PLINK PREFIX MAPS ============================
+# Phenotype files
+pheno_paths <- list(
+  AAU    = file.path(pheno_dir, "w_site_AAU_pheno_noNA.txt"),
+  Uganda = file.path(pheno_dir, "w_site_Uganda_pheno_noNA.txt"),
+  Moi    = file.path(pheno_dir, "w_site_Moi_pheno.txt"),
+  KEMRI  = file.path(pheno_dir, "w_site_KEMRI_pheno.txt"),
+  UCT    = file.path(pheno_dir, "w_site_UCT_pheno.txt")
+)
+
+# Programmatic PLINK prefixes: gp08_<SITE>_ldpruned
+plink_prefix_of <- function(site) file.path(plink_dir, sprintf("gp08_%s_ldpruned", site))
+
+# Non-fatal heads-up if some pheno files are missing
+missing_files <- names(pheno_paths)[!file.exists(unlist(pheno_paths))]
+if (length(missing_files) > 0) {
+  message("Note: phenotype files missing for: ", paste(missing_files, collapse = ", "))
+}
+```
+
+
+
+
+```{r}
+## ========= 4) MODEL SETTINGS ===============================================
+iid_col   <- "IID"
+pheno_col <- "assist_khat_amt"   # ordinal outcome
+
+# Per-site covariates (study_site only for AAU and Uganda)
+covars_map <- list(
+  AAU    = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5","study_site"),
+                categoricals = c("sex","study_site")),
+  Uganda = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5","study_site"),
+                categoricals = c("sex","study_site")),
+  Moi    = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5"),
+                categoricals = c("sex")),
+  KEMRI  = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5"),
+                categoricals = c("sex")),
+  UCT    = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5"),
+                categoricals = c("sex"))
+)
+
+## ========= 5) HELPERS ======================================================
+clean_complete <- function(ph, iid_col, y_col, covars) {
+  needed <- c(iid_col, y_col, covars)
+  needed <- intersect(needed, names(ph))
+  keep_idx <- stats::complete.cases(ph[, ..needed])
+  dropped  <- sum(!keep_idx)
+  if (dropped > 0) message("Dropped ", dropped, " rows with NA in {", paste(needed, collapse=", "), "}")
+  ph[keep_idx]
+}
+
+read_fam <- function(fam_file) {
+  fread(fam_file, col.names = c("FID","IID","PID","MID","SEX","PHENO"))
+}
+
+align_by_iid <- function(fam_dt, ph_dt, iid_col) {
+  setkeyv(fam_dt, "IID"); setkeyv(ph_dt, iid_col)
+  keep <- fam_dt[ph_dt, nomatch = 0]
+  ph_m <- ph_dt[match(keep$IID, ph_dt[[iid_col]]), ]
+  stopifnot(all(keep$IID == ph_m[[iid_col]]))
+  list(keep = keep, ph = ph_m)
+}
+
+run_site_null <- function(site, threads = 4) {
+  stopifnot(site %in% names(pheno_paths), site %in% names(covars_map))
+  message("=== ", site, " ===")
+
+  # Site-specific inputs
+  pheno_file <- pheno_paths[[site]]
+  plink_pref <- plink_prefix_of(site)
+  bed.fn <- paste0(plink_pref, ".bed")
+  bim.fn <- paste0(plink_pref, ".bim")
+  fam.fn <- paste0(plink_pref, ".fam")
+
+  # Input checks
+  if (!file.exists(pheno_file)) stop("Phenotype file not found: ", pheno_file)
+  if (!file.exists(bed.fn) || !file.exists(bim.fn) || !file.exists(fam.fn)) {
+    stop("PLINK files missing for ", site, " with prefix: ", plink_pref)
+  }
+
+  fam <- read_fam(fam.fn)
+  ph  <- fread(pheno_file)
+
+  # Align FAM and phenotype by IID (order matters)
+  ali  <- align_by_iid(fam, ph, iid_col)
+  keep <- ali$keep
+  ph_m <- ali$ph
+
+  # Site-specific covars
+  covars       <- covars_map[[site]]$covars
+  categoricals <- covars_map[[site]]$categoricals
+
+  # Drop rows with NA in IID / outcome / covars
+  ph_m <- clean_complete(ph_m, iid_col = iid_col, y_col = pheno_col, covars = covars)
+
+  # Re-align keep (IDs) to the cleaned phenotype
+  keep <- keep[keep$IID %in% ph_m[[iid_col]]]
+  ph_m <- ph_m[match(keep$IID, ph_m[[iid_col]]), ]
+  stopifnot(all(keep$IID == ph_m[[iid_col]]))
+
+  # Ensure categorical covars are factors
+  for (cc in intersect(categoricals, names(ph_m))) ph_m[[cc]] <- factor(ph_m[[cc]])
+
+  # Model formula
+  rhs <- if (length(covars) == 0) "1" else paste(covars, collapse = " + ")
+  fml <- as.formula(paste0("as.factor(", pheno_col, ") ~ ", rhs))
+
+  subjData_vec <- keep$IID
+  out_prefix   <- paste0(site, "_", sub("\\.(txt|tsv|csv)$","", basename(pheno_file)))
+
+  # Fit POLMM null (POLMM builds & uses dense GRM internally, then discards it)
+  objNull <- POLMM_Null_Model(
+    formula   = fml,
+    data      = ph_m,
+    PlinkFile = plink_pref,
+    subjData  = subjData_vec,
+    control   = list(threads = threads)  # adjust to your CPU
+  )
+
+  # Save null
+  null_path <- file.path(out_dir, paste0(out_prefix, "_polmm_null_dense.rds"))
+  saveRDS(objNull, null_path)
+
+  message("Saved null: ", null_path)
+  message("Tip: for association, use chrVec = names(objNull$LOCOList).")
+  invisible(objNull)
+}
+```
+
+```{r}
+## ========= 6) Dispatcher ========
+if (SITE == "ALL") {
+  objNull_list <- lapply(names(pheno_paths), function(s) {
+    tryCatch(run_site_null(s, threads = 4), error = function(e) { message("Failed ", s, ": ", e$message); NULL })
+  })
+  names(objNull_list) <- names(pheno_paths)
+  invisible(objNull_list)
+} else if (SITE %in% names(pheno_paths)) {
+  objNull <- run_site_null(SITE, threads = 4)
+  invisible(objNull)
+} else {
+  stop('SITE must be one of: "AAU", "Uganda", "Moi", "KEMRI", "UCT", or "ALL".')
+}
+```

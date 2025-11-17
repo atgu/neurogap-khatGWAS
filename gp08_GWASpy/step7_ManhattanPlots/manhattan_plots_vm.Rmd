@@ -1,0 +1,223 @@
+---
+title: "Generate manhattan_plot"
+author: "Nico Valencia"
+date: "2025-11-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(topr) # https://github.com/totajuliusd/topr/blob/master/man/figures/manhattan_wide_1080_high.gif
+library(dplyr)
+library('qqman')
+library('car')
+```
+
+
+```{r}
+# read in output from meta-analysis - huge file so will take a bit of time to read file 
+# this is gp08 w/ adjusted plink filters (maf & mind set to 0.05, and study_site as a covariate for
+  # Uganda and AAU)
+KU <- read.table(
+  '/Users/nvalenci/Desktop/work/khat_gwas/meta_analysis_output/gwaspy/saige_all_sites_assist_khat.meta',
+ header = TRUE,
+  sep = "",             
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+KU_minMAF <- read.table(
+  '/Users/nvalenci/Desktop/work/khat_gwas/meta_analysis_output/gwaspy/minMAF1e-2/saige_all_sites_assist_khat_minMAF1e-2.meta',
+ header = TRUE,
+  sep = "",             
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+
+KUF <- read.table(
+  "/Users/nvalenci/Desktop/work/khat_gwas/meta_analysis_output/gwaspy/minMAF1e-2/KUF_MinMAF1e-2Meta_SE_cleaned.tbl",
+  header = TRUE,
+  sep = "\t",          
+  quote = "\"",         
+  comment.char = "",    
+  fill = TRUE,          
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+
+KUF_NoUCT <- read.table(
+  "/Users/nvalenci/Desktop/work/khat_gwas/meta_analysis_output/gwaspy/minMAF1e-2/KUF_MinMAF1e-2Meta_NoUCT_SE_cleaned.tbl",
+  header = TRUE,
+  sep = "\t",          
+  quote = "\"",         
+  comment.char = "",    
+  fill = TRUE,          
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+
+
+```
+
+```{r}
+#manhattan(assist_khat_amt) - takes a long time to run
+#manhattan(assist_khat_amt, annotate=5e-8)
+
+# khat use manhattan plot
+# manhattan(assist_khat, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 5e-7)
+
+manhattan(KU, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 5e-8)
+
+manhattan(KU_minMAF, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 5e-8)
+
+
+```
+```{r}
+# manhattan plots for khat use frequency
+manhattan(KUF, chr = "CHR", bp = "BP", p = "P-value", snp = "MarkerName", annotatePval = 5e-7)
+
+manhattan(KUF_NoUCT, chr = "CHR", bp = "BP", p = "P-value", snp = "MarkerName", annotatePval = 5e-7)
+```
+
+```{r}
+# annotating most closely associated genes w/ SNPs
+
+# khat use frequency w/ annotated close genes
+# topr::manhattan(assist_khat, annotate = 5e-08, col = c("darkblue"), max.overlaps = Inf)
+
+# khat use frequency nearest gene annotation
+df_KUF <- KUF %>%
+  rename(
+    CHROM = CHR,
+    POS   = BP,
+    P     = `P-value`,
+    ID    = MarkerName          
+  ) 
+
+df_KUF_NoUCT <- KUF %>%
+  rename(
+    CHROM = CHR,
+    POS   = BP,
+    P     = `P-value`,
+    ID    = MarkerName          
+  ) 
+
+
+topr::manhattan(
+  df_KUF,
+  annotate = 5e-7,        
+  annotate_with = "Gene_Symbol",  
+  col = c("darkblue"),
+  max.overlaps = Inf
+)
+
+topr::manhattan(
+  df_KUF_NoUCT,
+  annotate = 5e-7,        
+  annotate_with = "Gene_Symbol",  
+  col = c("darkblue"),
+  max.overlaps = Inf
+)
+
+
+```
+```{r}
+# annotate nearest gene for khat use:
+
+KU_topr <- KU %>%
+  rename(
+    CHROM = CHR,
+    POS   = BP,
+    P     = P,    
+    ID    = SNP   
+  )
+
+topr::manhattan(
+  KU_topr,
+  annotate = 5e-7,       
+  annotate_with = "Gene_Symbol",  
+  color = "darkblue",
+  max.overlaps = Inf
+)
+
+KU_minMAF_topr <- KU_minMAF %>%
+  rename(
+    CHROM = CHR,
+    POS   = BP,
+    P     = P,    
+    ID    = SNP   
+  )
+
+topr::manhattan(
+  KU_minMAF_topr,
+  annotate = 5e-7,       
+  annotate_with = "Gene_Symbol",  
+  color = "darkblue",
+  max.overlaps = Inf
+)
+
+
+
+```
+
+```{r}
+# QQ plot function for GWAS p-values
+qq_gwas <- function(pvals, main = "QQ Plot", ...) {
+  pvals <- pvals[!is.na(pvals) & pvals > 0 & pvals <= 1]
+  observed <- -log10(sort(pvals))
+  expected <- -log10(ppoints(length(observed)))
+  plot(expected, observed, pch = 20, main = main,
+       xlab = expression(Expected~~-log[10](p)),
+       ylab = expression(Observed~~-log[10](p)), ...)
+  abline(0, 1, col = "red")
+}
+
+```
+
+```{r}
+#qq_gwas(assist_khat$P, main = "QQ Plot: GP-filtered Khat Use")
+
+qq_gwas(KU$P, main = "QQ Plot: GP0.8 Khat Use")
+
+qq_gwas(KU_minMAF$P, main = "QQ Plot: GP0.8; minMAF1e-2 Khat Use")
+
+qq_gwas(KUF$`P-value`, main = "QQ Plot: GP0.8; minMAF1e-2 Khat Use Frequency")
+
+qq_gwas(KUF_NoUCT$`P-value`, main = "QQ Plot: GP0.8; minMAF1e-2 Khat Use Frequency No UCT")
+
+```
+
+```{r}
+calc_lambda_gc <- function(p) {
+  p <- p[!is.na(p)]
+  # keep only valid (0,1] and cap zeros that may arise from underflow
+  p <- p[p > 0 & p <= 1]
+  if (length(p) < 10) stop("Not enough p-values after filtering.")
+  chisq <- qchisq(1 - p, df = 1)
+  median(chisq, na.rm = TRUE) / qchisq(0.5, df = 1)  
+}
+
+
+# 1) KU(uses column P; optionally use P(R) if you prefer random-effects)
+lambda_KU  <- calc_lambda_gc(KU$P)
+
+# 2) KU_minMAF
+lambda_KU_fixed  <- calc_lambda_gc(KU_minMAF$P)
+
+# 3) KUF (column is "P-value")
+lambda_KUF <- calc_lambda_gc(KUF$`P-value`)
+
+# 4) KUF_NoUCT 
+lambda_KUF_NoUCT <- calc_lambda_gc(KUF_NoUCT$`P-value`)
+
+lambda_KU; lambda_KU_fixed; lambda_KUF; lambda_KUF_NoUCT
+
+```
+
+

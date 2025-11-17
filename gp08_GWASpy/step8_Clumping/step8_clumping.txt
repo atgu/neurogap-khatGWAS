@@ -1,0 +1,23 @@
+/home/tboltz/apps/plink2 \
+  --bfile /home/nvalenci/gp08_data/gwaspy_filtered/all_sites_all_phenos_nodup \
+  --clump saige_all_sites_assist_khat.meta \
+  --clump-id-field SNP \
+  --clump-kb 250 \
+  --clump-p-field P \
+  --clump-p1 5e-7 \
+  --clump-p2 0.01 \
+  --clump-r2 0.1 \
+  --out clump/GWASpyGP08_KhatUse
+
+
+# NOTE:
+# only variants w/ P < 5e-7 can be lead vars for a clump
+# clump-p2 0.01: variants w/ P < 0.01 can be in this lead var's clump
+	# these vars need to be in 250 kb range of that lead var
+# clump-r2 0.1: LD threshold --> a variant is clumped w/ index if it's r^2 
+	# with the lead var is >= 0.1
+
+# I also don't know if I delimited this properly.
+	# these are all the correct parameters, but I will need to check delimiting 
+	# later. 
+
