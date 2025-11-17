@@ -7,55 +7,56 @@ through MAC <= 20 are then removed by MAF 0.05. MAF 0.05 removes MAC <= 20 and m
 If you would like to access the original files that have gone through up to GWASpy, you can
 find them here:
 gs://neurogap-bge-imputed-regional/lerato/wave2/plink_files/*_passed_all_qc.bed
-where * can just be replaced with the name of any of the sites.
 
+You can access the phenotype files here: 
+gs://neurogap-bge-imputed-regional/nico/khat_gwas/phenotype_files/special_char_change/no_hyphen/w_site
+These files just had study_site carried voer from a set of phenotype files Lerato made. You can refer to ### Step 1 ### for more info
 
+From Lerato, will need to collect...
+- GP08 pipeline (one I have is clunky)
+- GWASpy pipeline 
 
 What is below is notes on the scripts I made:
 
 ### Step 1 ###
-Regarding step1 (making the phenotype files), I was having some issues with it in the beginning. I think this was an ID issue but I just moved 
-forward with my part of the project without this. The only change I made was just adding on the study_site column for all sites.
+Regarding step1 (making the phenotype files), I was having some issues with it in the beginning. I think this was an ID issue but I just moved forward with my part of the project without this running on my end. The only change I made was just adding on the study_site column for all sites by referencing a phenotype file that Lerato provided me
 
 ### Step 2 ###
 This version of step2 just transforms NA values of assist_khat_amt (khat use frequency in past 3 months) to 0 if assist_khat = 0 for that sample.
-One sample was dropped in this @ UCT due to remaining NA after this. This script also creates 2 stacked barplots for the distribution of khat use and khat
-use frequency across sites
+One sample was dropped in this @ UCT due to remaining NA after this. This script also creates 2 stacked barplots for the distribution of khat use and khat use frequency across sites.
 
 ### Step 3 ###
 This filtering step just does MAF 0.05, MAC 20, and LD 0.10 using the data Lerato made going through the GWASpy pipeline. You'll need to get
-that specific code she used to make the data that goes through this pipeline if you'd like to recreate this exactly. Otherwise, you can find the
-data here: gs://neurogap-bge-imputed-regional/lerato/wave2/plink_files/*_passed_all_qc.bed
-I talk about the filtering steps in these slides: https://docs.google.com/presentation/d/1ijAZ6LsRDVAbitzvqrd2rX2o3m_1rXD4s9Su2tjDRh8/edit?slide=id.g368ca55b1a0_0_14#slide=id.g368ca55b1a0_0_14
+that specific code she used to make the data that goes through this pipeline if you'd like to recreate this exactly. Otherwise, you can find the data here: gs://neurogap-bge-imputed-regional/lerato/wave2/plink_files/*_passed_all_qc.bed
+
+I talk about the filtering steps in these slides: 
+https://docs.google.com/presentation/d/1ijAZ6LsRDVAbitzvqrd2rX2o3m_1rXD4s9Su2tjDRh8/edit?slide=id.g368ca55b1a0_0_14#slide=id.g368ca55b1a0_0_14
 
 Regarding using MAF and MAC, usually one or the other is used. However, I just continued using what I thought was the current version that uses both.
 A MAC of 20 is very small. MAF 0.05 removes MAC 20 vars and more so there's no need to worry there.
 
-### Step 4 POLMM & SAIGE null ###
+### Step 4 POLMM & SAIGE null hypothesis creation ###
 The biggest note here is that study_site was added as a covariate for AAU & Uganda w/ AAU, Uganda, KEMRI, Moi, and UCT all sharing PCs 1-10, age, & sex
 I ran the POLMM null model (khat use frequency, ordinal data) creation steps locally on my laptop. I remember it working for hailbatch, but I haven't tried it recently since we've been
-experiencing issues recently. This takes a while though (maybe a few hours for all of them). In the current script there is an option to run ALL sites at once.
+experiencing issues with reading in larger plink files. This takes a while though (maybe a few hours for all of them). In the current script there is an option to run ALL sites at once.
 I don't recommend doing that, just do it one at a time so you can see the outputs as they come.
 
-SAIGE null model (khat use, binary data) was run through a VM. It was pretty fast from what I remember
+SAIGE null model (khat use, binary data) was run through a VM. It was pretty fast from what I remember.
 
 ### Step 5 Association Testing ###
 There are filters for SAIGE & POLMM association testing. 
-POLMM had variant level missingness filter of 0.15, and minMAF 1e-2 (removes so many vars)
+POLMM had variant level missingness filter of 0.15, and minMAF 1e-2 
 SAIGE has the same variant level missingness filter, but instead uses minMAC 0.5 to ensure at least one minor allele is present in association testing.
 
-Because of this discrepency, you could probably try filtering the association testing data MAC 1 then try doing step 4 then 5 for POLMM only if you
-want to see if it results in more sites passing. I'm doubtful it will work as filtering out even more variants with a minMAF filter of 1e-3 or the
-default 1e-4 resulted in so many sites still failing. In this case of testing, you could set minMAF to 1e-100000 or something extremely small to
-let as many vars pass since that MAC filter done through PLINK makes the POLMM assoc test match SAIGE.
+Because of this discrepency, you could probably try filtering the association testing data MAC 1 then try doing step 5 for POLMM only if you
+want to see if it results in more sites passing. I'm doubtful it will work as filtering out even more variants with a minMAF filter of 1e-3 or the default 1e-4 resulted in so many sites still failing. In this case of testing, you could set minMAF to 1e-100000 or something extremely small to let as many vars pass since that MAC filter done through PLINK makes the POLMM assoc test match SAIGE.
 
-Another difference between POLMM & SAIGE is how they store association test outputs. POLMM will keep all variants but flag them as NA, and SAIGE just
-drops them. I think this is what results in POLMM taking so long as compared to SAIGE alongside the more intensive calculation for ranked data.
+Another difference between POLMM & SAIGE is how they store association test outputs. POLMM will keep all variants but flag them as NA, and SAIGE just drops them. I think this is what results in POLMM taking so long as compared to SAIGE alongside the more intensive calculation for ranked-ordinal data.
 
 Another note, the association testing step for POLMM is EXTREMELY slow. It took me maybe 5 days to run it. This could probably be
 cut in half if you just run muliple association tests, but that entails making the vm a lot larger (maybe 2.5 times as large as it currently is).
-POLMM has these large spikes where in the current VM's cpu specs it jumps between 20% - 80% and it will do this throughout association testing.
-Current version of the script just runs things one after another. 
+POLMM has these large spikes where in the current VM's cpu specs it jumps between 20% - 80% and it will do this throughout association testing. You can also consider dropping association testing for UCT if you'd like. What I have was just done as a test but the meta-analysis w/ it only includes more variants that are very non-significant.
+Current version of the script just runs things one after another. Refer to the folder for more notes.
 
 
 ### Step 6 Meta-analysis ###
@@ -67,7 +68,7 @@ I used it because it was pretty easy to adapt. I made a readme.txt file in that 
 This part of the pipeline isn't that pretty and could definitely be made easier if you want, but following the readme.txt file results in working outputs.
 	In this, I did meta-analysis through METAL using the standard error approach. There is a pvalue version, but everything comes out really inflated
 		(e.g., the lambda gc of an SE meta-analysis was ~1.0 and the pval approach was ~3.8).
-		Alicia and Toni just said to use that SE approach since it follows the same as the PLINK approach
+
 
 ### Step 7 Manhattan Plot ###
 There are a few files I loaded in this script:
@@ -83,7 +84,7 @@ Those other two were tests.
 
 Pretty straightforward script, has more notes there if you'd like to know what each of the functions does. You can change the referenced
 file to be anything, but you need the combined association testing file to capture LD. Tried combining the by-site files and it was a bit weird.
-Try using this file: gs://neurogap-bge-imputed-regional/lerato/wave2/plink_files/all_sites_all_phenos.*
+Try using this file: gs://neurogap-bge-imputed-regional/lerato/wave2/plink_files/all_sites_all_phenos.* as your reference file
 
 
 I'll try to cleanup things later on, but everything that I used to get to where the Khat GWAS currently is should be here.
