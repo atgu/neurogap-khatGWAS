@@ -1,0 +1,138 @@
+---
+title: "Generate manhattan_plot"
+author: "Nico Valencia"
+date: "2025-11-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(topr) # https://github.com/totajuliusd/topr/blob/master/man/figures/manhattan_wide_1080_high.gif
+library(dplyr)
+library('qqman')
+library('car')
+```
+
+
+```{r}
+# read in output from meta-analysis - huge file so will take a bit of time to read file 
+
+
+KU <- read.table(
+  '/Users/nvalenci/Desktop/work/khat_gwas/meta_analysis_output/gwaspy/corrected/ku_gp08_meta_cleaned.txt',
+ header = TRUE,
+  sep = "",             
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+KUF <- read.table(
+  '/Users/nvalenci/Desktop/work/khat_gwas/meta_analysis_output/gwaspy/corrected/kuf_gp08_meta_cleaned.txt',
+ header = TRUE,
+  sep = "",             
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+
+```
+
+```{r}
+#manhattan plot creation
+
+
+manhattan(KU, chr = "CHR", bp = "BP", p = "P-value", snp = "MarkerName", annotatePval = 5e-8)
+
+manhattan(KUF, chr = "CHR", bp = "BP", p = "P-value", snp = "MarkerName", annotatePval = 5e-8)
+
+
+```
+
+
+```{r}
+# annotate nearest gene:
+
+KU_topr <- KU %>%
+  rename(
+    CHROM = CHR,
+    POS   = BP,
+    P     = 'P-value',    
+    ID    = MarkerName   
+  )
+
+KUF_topr <- KUF %>%
+  rename(
+    CHROM = CHR,
+    POS   = BP,
+    P     = 'P-value',    
+    ID    = MarkerName   
+  )
+
+topr::manhattan(
+  KU_topr,
+  annotate = 5e-7,       
+  annotate_with = "Gene_Symbol",  
+  color = "darkblue",
+  max.overlaps = Inf
+)
+
+topr::manhattan(
+  KUF_topr,
+  annotate = 5e-7,       
+  annotate_with = "Gene_Symbol",  
+  color = "darkblue",
+  max.overlaps = Inf
+)
+
+```
+
+```{r}
+# QQ plot function for GWAS p-values
+qq_gwas <- function(pvals, main = "QQ Plot", ...) {
+  pvals <- pvals[!is.na(pvals) & pvals > 0 & pvals <= 1]
+  observed <- -log10(sort(pvals))
+  expected <- -log10(ppoints(length(observed)))
+  plot(expected, observed, pch = 20, main = main,
+       xlab = expression(Expected~~-log[10](p)),
+       ylab = expression(Observed~~-log[10](p)), ...)
+  abline(0, 1, col = "red")
+}
+
+```
+
+```{r}
+# plotting out QQ plots
+
+qq_gwas(KU$P, main = "QQ Plot: GP0.8 Khat Use")
+
+qq_gwas(KUF$P, main = "QQ Plot: GP0.8 Khat Use Frequency")
+
+
+
+```
+
+```{r}
+calc_lambda_gc <- function(p) {
+  p <- p[!is.na(p)]
+  p <- p[p > 0 & p <= 1]
+  if (length(p) < 10) stop("Not enough p-values after filtering.")
+  chisq <- qchisq(1 - p, df = 1)
+  median(chisq, na.rm = TRUE) / qchisq(0.5, df = 1)  
+}
+
+
+# 1) KU(uses column P; optionally use P(R) if you prefer random-effects)
+lambda_KU  <- calc_lambda_gc(KU$P)
+
+
+
+# 2) KUF (column is "P-value")
+lambda_KUF <- calc_lambda_gc(KUF$P)
+
+
+
+```
+

@@ -1,0 +1,24 @@
+bfile can be found here:
+gs://neurogap-bge-imputed-regional/lerato/wave2/plink_files/NeuroGAP_passed_all_qc_no_multi_allele.bed
+
+/home/tboltz/apps/plink2 \
+  --bfile ~/neurogap_passed_all_qc/NeuroGAP_passed_all_qc_no_multi_allele \
+  --clump ~/generic-metal/ku_gp08_meta_cleaned.txt \
+  --clump-id-field MarkerName \
+  --clump-p-field P-value \
+  --clump-kb 250 \
+  --clump-p1 5e-7 \
+  --clump-p2 0.01 \
+  --clump-r2 0.1 \
+  --out ~/clump/ku_gwaspy_clump
+
+/home/tboltz/apps/plink2 \
+  --bfile ~/neurogap_passed_all_qc/NeuroGAP_passed_all_qc_no_multi_allele \
+  --clump ~/generic-metal/kuf_gp08_meta_cleaned.txt \
+  --clump-id-field MarkerName \
+  --clump-p-field P-value \
+  --clump-kb 250 \
+  --clump-p1 5e-7 \
+  --clump-p2 0.01 \
+  --clump-r2 0.1 \
+  --out ~/clump/kuf_gwaspy_clump

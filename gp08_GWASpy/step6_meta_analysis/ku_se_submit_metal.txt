@@ -1,0 +1,23 @@
+SCHEME STDERR
+
+MARKER SNPID
+ALLELE A1 A2
+EFFECT BETA
+STDERR SE
+PVALUELABEL p.value
+WEIGHTLABEL N_SITE
+
+FREQLABEL AF FREQ
+AVERAGEFREQ ON
+MINMAXFREQ ON
+
+PROCESS gp08_AAU_ALLCHR_assist_khat_saige_assoc.txt
+PROCESS gp08_KEMRI_ALLCHR_assist_khat_saige_assoc.txt
+PROCESS gp08_Moi_ALLCHR_assist_khat_saige_assoc.txt
+PROCESS gp08_UCT_ALLCHR_assist_khat_saige_assoc.txt
+PROCESS gp08_Uganda_ALLCHR_assist_khat_saige_assoc.txt
+
+OUTFILE gp08_meta_ .
+
+ANALYZE
+QUIT
