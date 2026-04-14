@@ -8,7 +8,7 @@ AFR_DIR=/home/nvalenci/sud/munged_afr
 OUTDIR=/home/nvalenci/sud/ldsc_rg_afr
 mkdir -p "$OUTDIR"
 
-# KU + KUF are in munged_afr (per your ls)
+# KU + KUF are in munged_afr 
 KU="${AFR_DIR}/ku_gp08_meta_cleaned.txt.sumstats.gz"
 KUF="${AFR_DIR}/kuf.sumstats.gz"
 
