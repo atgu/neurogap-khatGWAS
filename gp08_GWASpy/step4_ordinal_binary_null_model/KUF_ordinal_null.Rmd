@@ -32,8 +32,7 @@ pheno_paths <- list(
   AAU    = file.path(pheno_dir, "no_char_AAU_khat_pheno_subset_lerato_with_studysite.tsv"),
   Uganda = file.path(pheno_dir, "no_char_Uganda_khat_pheno_subset_lerato_with_studysite.tsv"),
   Moi    = file.path(pheno_dir, "no_char_Moi_khat_pheno_subset_lerato_with_studysite.tsv"),
-  KEMRI  = file.path(pheno_dir, "no_char_KEMRI_khat_pheno_subset_lerato_with_studysite.tsv"),
-  UCT    = file.path(pheno_dir, "no_char_UCT_khat_pheno_subset_lerato_with_studysite.tsv")
+  KEMRI  = file.path(pheno_dir, "no_char_KEMRI_khat_pheno_subset_lerato_with_studysite.tsv")
 )
 
 # Programmatic PLINK prefixes: gp08_<SITE>_ldpruned
@@ -166,6 +165,6 @@ if (SITE == "ALL") {
   objNull <- run_site_null(SITE, threads = 4)
   invisible(objNull)
 } else {
-  stop('SITE must be one of: "AAU", "Uganda", "Moi", "KEMRI", "UCT", or "ALL".')
+  stop('SITE must be one of: "AAU", "Uganda", "Moi", "KEMRI", or "ALL".')
 }
 ```
