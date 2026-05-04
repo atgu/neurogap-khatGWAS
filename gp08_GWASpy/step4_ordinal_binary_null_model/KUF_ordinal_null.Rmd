@@ -60,12 +60,10 @@ covars_map <- list(
                 categoricals = c("sex","study_site")),
   Uganda = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5","study_site"),
                 categoricals = c("sex","study_site")),
-  Moi    = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5"),
-                categoricals = c("sex")),
-  KEMRI  = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5"),
-                categoricals = c("sex")),
-  UCT    = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5"),
-                categoricals = c("sex"))
+  Moi    = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5","study_site"),
+                categoricals = c("sex","study_site")),
+  KEMRI  = list(covars = c("age","sex","PC1","PC2","PC3","PC4","PC5","study_site"),
+                categoricals = c("sex","study_site"))
 )
 
 ## ========= 5) HELPERS ======================================================
