@@ -56,6 +56,7 @@ To do:
   - Locuszoom plots
   - GCTA GREML h2 estimate
   - PRS accuracy changes w/ KU and KUF
+  - Add sparkcluster startup commands and approximate run times
 
 
 
