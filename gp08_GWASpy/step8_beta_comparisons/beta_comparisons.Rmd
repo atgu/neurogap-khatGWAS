@@ -1,0 +1,2033 @@
+---
+title: "stepX_beta_comparisons"
+author: "Nico Matthew S. Valencia"
+output: html_document
+---
+
+You can refer here to how my files looked when I sent it to google cloud:
+gs://neurogap-bge-imputed-regional/nico/sud-gwas/rsid_match
+If you just download like from "gsutil cp gs://neurogap-bge-imputed-regional/nico/sud-gwas/rsid_match"
+you'll have the same structure
+
+```{r}
+
+#install.packages("ggplot2")
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggrepel)
+```
+
+
+
+
+```{r}
+# Hatoum: list all harmonized pairwise files
+data_dir <- "/Users/nico/work/sud/hatoum_lifted_harmonized"
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_Hatoum2023AddictionEuropean_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+files
+```
+
+```{r}
+# Hatoum: pvalue threshold
+hatoum_thresh <- 1e-3
+ku_thresh <- 1e-2
+```
+
+```{r}
+# Hatoum: graphing
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE,
+    stringsAsFactors = FALSE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("^beta_Hatoum2023AddictionEuropean.*_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "P"
+
+  cat("x_beta:", x_beta, "\n")
+  cat("y_beta:", y_beta, "\n")
+  cat("x_p:", x_p, "\n")
+  cat("y_p:", y_p, "\n")
+
+  if (length(x_beta) != 1 || length(y_beta) != 1 || length(x_p) != 1 || !(y_p %in% names(dat))) {
+    cat("Skipping because required columns were not found.\n")
+    print(names(dat))
+    next
+  }
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < hatoum_thresh,
+  ]
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  khat_n_label <- ifelse(
+    grepl("^ku_", pair_name),
+    "KU N = 33,210",
+    "KUF N = 25,869"
+  )
+
+  sud_n_label <- "SUD N = 1,025,550"
+
+  cat("Total SNPs:", nrow(dat), "\n")
+  cat("Filtered SNPs:", nrow(dat_filt), "\n")
+
+  plot_dat <- if (nrow(dat_filt) >= 3) dat_filt else dat
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NGAP P < ", ku_thresh, " | Hatoum P < ", hatoum_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.subtitle = element_text(size = 9)
+    ) +
+    labs(
+      title = paste0("NGAP: ", khat_trait, " x Hatoum Addiction European"),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        sud_n_label,
+        " | ",
+        plot_label,
+        " | SNPs = ", nrow(plot_dat),
+        " | r = ", round(pearson_r, 4)
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = "Hatoum Addiction beta"
+    )
+
+  print(p)
+}
+
+```
+
+```{r}
+# Johnson: setup
+
+data_dir <- "/Users/nico/work/sud/johnson_lifted_harmonized"
+
+ku_thresh <- 1e-2
+johnson_thresh <- 1e-3
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_CUD_EUR_casecontrol_public_11\\.14\\.2020_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+cat("Files found:", length(files), "\n")
+print(basename(files))
+
+```
+
+```{r}
+# Johnson: beta comparison plots
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  is_ku <- grepl("^ku_", basename(file))
+
+  if (is_ku) {
+    khat_beta <- "beta_ku"
+    khat_p <- "p_ku"
+    khat_trait <- "Khat Use"
+    khat_n_label <- "KU N = 33,210"
+  } else {
+    khat_beta <- "beta_kuf"
+    khat_p <- "p_kuf"
+    khat_trait <- "Khat Use Frequency"
+    khat_n_label <- "KUF N = 25,869"
+  }
+
+  dat <- read.table(
+    file,
+    header = FALSE,
+    sep = "\t",
+    skip = 1,
+    fill = TRUE,
+    stringsAsFactors = FALSE,
+    col.names = c(
+      "khat_marker",
+      "CHR",
+      "BP",
+      "khat_A1",
+      "khat_A2",
+      khat_beta,
+      khat_p,
+      "johnson_marker",
+      "johnson_A1",
+      "johnson_A2",
+      "beta_CUD_EUR_casecontrol",
+      "beta_CUD_EUR_casecontrol_to_khat_A1",
+      "P",
+      "allele_match_status",
+      "SE",
+      "N",
+      "N_CAS",
+      "N_CON"
+    )
+  )
+
+  x_beta <- khat_beta
+  y_beta <- "beta_CUD_EUR_casecontrol_to_khat_A1"
+  x_p <- khat_p
+  y_p <- "P"
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < johnson_thresh,
+  ]
+
+  cat("Total SNPs:", nrow(dat), "\n")
+  cat("Filtered SNPs:", nrow(dat_filt), "\n")
+
+  plot_dat <- if (nrow(dat_filt) >= 3) dat_filt else dat
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NGAP P < ", ku_thresh, " | Johnson P < ", johnson_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.subtitle = element_text(size = 8)
+    ) +
+    labs(
+      title = paste0("NGAP ", khat_trait, " x Johnson CUD European Case-Control"),
+      subtitle = paste0(
+        khat_n_label,
+        " | CUD N = 357,806",
+        " | ",
+        plot_label,
+        " | SNPs = ", nrow(plot_dat),
+        " | r = ", round(pearson_r, 4)
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = "Johnson CUD Beta"
+    )
+
+  print(p)
+}
+
+# output labels:
+# Full public: Everyone
+# Case-control: Includes unrelated individuals
+```
+
+```{r}
+# Levey: setup
+
+data_dir <- "/Users/nico/work/sud/levey_lifted_harmonized"
+
+levey_thresh <- 1e-3
+ku_thresh <- 1e-2
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_(AFR|EUR)_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+cat("Number of files found:", length(files), "\n")
+print(basename(files))
+```
+
+```{r}
+# Levey: beta comparison plots
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "pval"
+
+  cat("x_beta:", x_beta, "\n")
+  cat("y_beta:", y_beta, "\n")
+  cat("x_p:", x_p, "\n")
+  cat("y_p:", y_p, "\n")
+
+  stopifnot(
+    length(x_beta) == 1,
+    length(y_beta) == 1,
+    length(x_p) == 1,
+    y_p %in% names(dat)
+  )
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < levey_thresh,
+  ]
+
+  cat("Total SNPs:", nrow(dat), "\n")
+  cat("Filtered SNPs:", nrow(dat_filt), "\n")
+
+  plot_dat <- if (nrow(dat_filt) >= 3) dat_filt else dat
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  ancestry_label <- ifelse(
+    grepl("_AFR_", pair_name),
+    "African",
+    "European"
+  )
+
+  levey_trait <- paste0("Levey ", ancestry_label)
+
+  cud_n_label <- ifelse(
+    ancestry_label == "African",
+    "CUD N = 123,208",
+    "CUD N = 886,025"
+  )
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NeuroGAP P < ", ku_thresh, " | Levey P < ", levey_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    labs(
+    title = paste0("NGAP: ", khat_trait, " x ", levey_trait, " CUD"),
+    subtitle = paste0(
+      cud_n_label,
+      " | ",
+      plot_label,
+      " | SNPs = ", nrow(plot_dat),
+      " | r = ", round(pearson_r, 4)
+    ),
+    x = paste0(khat_trait, " beta"),
+    y = "CUD Beta"
+)
+
+  print(p)
+}
+```
+```{r}
+# Liu: Read ins 
+
+data_dir <- "/Users/nico/work/sud/liu_lifted_harmonized"
+
+liu_thresh <- 1e-3
+ku_thresh <- 1e-2
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_.+_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+length(files)
+basename(files)
+
+```
+
+```{r}
+# Liu: beta comparisons
+
+for (file in files) {
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "PVALUE"
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  dat_filt <- subset(
+    dat,
+    dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < liu_thresh
+  )
+
+  if (nrow(dat_filt) < 3)
+    next
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  liu_trait <- sub("^(ku|kuf)_", "", pair_name)
+  liu_trait <- sub("_harmonized$", "", liu_trait)
+
+  liu_trait <- switch(
+    liu_trait,
+    AgeofInitiation = "Age of Initiation",
+    AgeOfInitiation_WithoutUKB = "Age of Initiation (Without UKB)",
+    CigarettesPerDay = "Cigarettes per Day",
+    CigarettesPerDay_WithoutUKB = "Cigarettes per Day (Without UKB)",
+    DrinksPerWeek = "Drinks per Week",
+    DrinksPerWeek_WithoutUKB = "Drinks per Week (Without UKB)",
+    SmokingInitiation = "Smoking Initiation",
+    SmokingInitiation_WithoutUKB = "Smoking Initiation (Without UKB)",
+    SmokingCessation = "Smoking Cessation",
+    SmokingCessation_WithoutUKB = "Smoking Cessation (Without UKB)",
+    liu_trait
+  )
+
+  khat_n_label <- ifelse(
+    grepl("^ku_", pair_name),
+    "KU N = 33,210",
+    "KUF N = 25,869"
+  )
+
+  liu_n_lookup <- c(
+  "Smoking Initiation" = "632,802",
+  "Smoking Initiation (No UKB)" = "559,471",
+  "Smoking Cessation" = "312,821",
+  "Smoking Cessation (No UKB)" = "281,073",
+  "Drinks per Week" = "537,349",
+  "Drinks per Week (No UKB)" = "477,350",
+  "Cigarettes per Day" = "263,954",
+  "Cigarettes per Day (No UKB)" = "242,429",
+  "Age of Initiation" = "262,990",
+  "Age of Initiation (No UKB)" = "240,603"
+  )
+
+  liu_n_label <- if (liu_trait %in% names(liu_n_lookup)) {
+    paste0(liu_trait, " N = ", liu_n_lookup[[liu_trait]])
+  } else {
+    paste0(liu_trait, " N = NA")
+  }
+
+  pearson_r <- cor(
+    dat_filt[[x_beta]],
+    dat_filt[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  print(
+    ggplot(
+      dat_filt,
+      aes(
+        x = .data[[x_beta]],
+        y = .data[[y_beta]]
+      )
+    ) +
+      geom_point(alpha = 0.5) +
+      geom_hline(yintercept = 0) +
+      geom_vline(xintercept = 0) +
+      theme_bw() +
+      labs(
+        title = paste0(
+          "NGAP: ",
+          khat_trait,
+          " x Liu: ",
+          liu_trait
+        ),
+        subtitle = paste0(
+          "NeuroGAP P < ", ku_thresh,
+          " | Liu P < ", liu_thresh,
+          " | N = ", nrow(dat_filt),
+          " | r = ", round(pearson_r, 4)
+        ),
+        x = paste0(khat_trait, " beta"),
+        y = paste0(liu_trait, " beta")
+      )
+  )
+}
+```
+```{r}
+# Saunders: setup
+
+data_dir <- "/Users/nico/work/sud/saunders_lifted_harmonized"
+
+saunders_thresh <- 1e-3
+ku_thresh <- 1e-2
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_(AgeSmk|CigDay|DrnkWk|SmkCes|SmkInit)_(AFR|AMR|EAS|EUR)_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+cat("Number of files found:", length(files), "\n")
+print(basename(files))
+```
+
+```{r}
+# Saunders: beta comparison plots
+
+for (file in files) {
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "P"
+
+  stopifnot(
+    length(x_beta) == 1,
+    length(y_beta) == 1,
+    length(x_p) == 1,
+    y_p %in% names(dat)
+  )
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < saunders_thresh,
+  ]
+
+  plot_dat <- if (nrow(dat_filt) >= 3) dat_filt else dat
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  khat_n_label <- ifelse(
+    grepl("^ku_", pair_name),
+    "KU N = 33,210",
+    "KUF N = 25,869"
+  )
+
+  saunders_raw <- sub("^(ku|kuf)_", "", pair_name)
+  saunders_raw <- sub("_harmonized$", "", saunders_raw)
+
+  ancestry <- sub("^.*_(AFR|AMR|EAS|EUR)$", "\\1", saunders_raw)
+  trait_raw <- sub("_(AFR|AMR|EAS|EUR)$", "", saunders_raw)
+
+  ancestry_label <- switch(
+    ancestry,
+    AFR = "AFR",
+    AMR = "AMR",
+    EAS = "EAS",
+    EUR = "EUR",
+    ancestry
+  )
+
+  trait_label <- switch(
+    trait_raw,
+    AgeSmk = "Age SmkInit",
+    CigDay = "Cigs per Day",
+    DrnkWk = "Drnks per Week",
+    SmkCes = "Age SmkCess",
+    SmkInit = "SmkInit",
+    trait_raw
+  )
+
+  saunders_n <- case_when(
+    trait_raw == "SmkInit" & ancestry == "EUR" ~ 805431,
+    trait_raw == "SmkInit" & ancestry == "AMR" ~ 286026,
+    trait_raw == "SmkInit" & ancestry == "AFR" ~ 119589,
+    trait_raw == "SmkInit" & ancestry == "EAS" ~ 296395,
+
+    trait_raw == "AgeSmk" & ancestry == "EUR" ~ 323836,
+    trait_raw == "AgeSmk" & ancestry == "AMR" ~ 33914,
+    trait_raw == "AgeSmk" & ancestry == "AFR" ~ 17508,
+    trait_raw == "AgeSmk" & ancestry == "EAS" ~ 63353,
+
+    trait_raw == "CigDay" & ancestry == "EUR" ~ 326497,
+    trait_raw == "CigDay" & ancestry == "AMR" ~ 35129,
+    trait_raw == "CigDay" & ancestry == "AFR" ~ 20157,
+    trait_raw == "CigDay" & ancestry == "EAS" ~ 108275,
+
+    trait_raw == "SmkCes" & ancestry == "EUR" ~ 388313,
+    trait_raw == "SmkCes" & ancestry == "AMR" ~ 90525,
+    trait_raw == "SmkCes" & ancestry == "AFR" ~ 34970,
+    trait_raw == "SmkCes" & ancestry == "EAS" ~ 121859,
+
+    trait_raw == "DrnkWk" & ancestry == "EUR" ~ 666978,
+    trait_raw == "DrnkWk" & ancestry == "AMR" ~ 274707,
+    trait_raw == "DrnkWk" & ancestry == "AFR" ~ 95343,
+    trait_raw == "DrnkWk" & ancestry == "EAS" ~ 160775,
+
+    TRUE ~ NA_real_
+  )
+
+  saunders_n_label <- paste0(
+    trait_label,
+    " ",
+    ancestry,
+    " N = ",
+    format(saunders_n, big.mark = ",", scientific = FALSE)
+  )
+
+  saunders_label <- paste0(
+    "Saunders ",
+    trait_label,
+    " ",
+    ancestry_label
+  )
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NGAP P < ", ku_thresh, " | Saunders P < ", saunders_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.subtitle = element_text(size = 8)
+    ) +
+    labs(
+      title = paste0("NGAP: ", khat_trait, " x ", saunders_label),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        saunders_n_label,
+        " | ",
+        plot_label,
+        " | SNPs = ", nrow(plot_dat),
+        " | r = ", round(pearson_r, 4)
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = paste0(trait_raw, " beta")
+    )
+
+  print(p)
+}
+
+# 06-29-26 --> rerun this because current doesn't separate words correctly on y-axis
+  # added space
+# Note: Data for EUR doesn't include 23andMe
+```
+```{r}
+# Walters: setup
+
+data_dir <- "/Users/nico/work/sud/walters_lifted_harmonized"
+
+walters_thresh <- 1e-3
+ku_thresh <- 1e-2
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_pgc_alcdep_trans_fe_unrel_geno_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+cat("Number of files found:", length(files), "\n")
+print(basename(files))
+```
+
+```{r}
+# Walters: beta comparison plots
+
+for (file in files) {
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "P"
+
+  stopifnot(
+    length(x_beta) == 1,
+    length(y_beta) == 1,
+    length(x_p) == 1,
+    y_p %in% names(dat)
+  )
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < walters_thresh,
+  ]
+
+  plot_dat <- if (nrow(dat_filt) >= 3) dat_filt else dat
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  khat_n_label <- ifelse(
+    grepl("^ku_", pair_name),
+    "KU N = 33,210",
+    "KUF N = 25,869"
+  )
+
+  walters_label <- "Walters Alcohol Dependence Trans-ancestry"
+
+  alcdep_n_label <- "ALCDep N = 52,848"
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NeuroGAP P < ", ku_thresh,
+           " | Walters P < ", walters_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.subtitle = element_text(size = 8)
+    ) +
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x ",
+        walters_label
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        alcdep_n_label,
+        " | ",
+        plot_label,
+        " | SNPs = ",
+        nrow(plot_dat),
+        " | r = ",
+        round(pearson_r, 4)
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = paste0(
+        walters_label,
+        " beta"
+      )
+    )
+
+  print(p)
+}
+```
+
+### PLOTTING ONLY IF BETA FOR KU/KUF I POSITIVE
+
+
+
+```{r}
+
+#install.packages("ggplot2")
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+```
+
+
+
+
+```{r}
+# Hatoum: list all harmonized pairwise files
+data_dir <- "/Users/nico/work/sud/hatoum_lifted_harmonized"
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_Hatoum2023AddictionEuropean_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+files
+```
+
+```{r}
+# Hatoum: pvalue threshold
+hatoum_thresh <- 1e-3
+ku_thresh <- 1e-2
+ku_sug_thresh <- 1e-5
+```
+
+```{r}
+# Hatoum: positive KU/KUF beta graphing
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE,
+    stringsAsFactors = FALSE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("^beta_Hatoum2023AddictionEuropean.*_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "P"
+
+  cat("x_beta:", x_beta, "\n")
+  cat("y_beta:", y_beta, "\n")
+  cat("x_p:", x_p, "\n")
+  cat("y_p:", y_p, "\n")
+
+  if (length(x_beta) != 1 ||
+      length(y_beta) != 1 ||
+      length(x_p) != 1 ||
+      !(y_p %in% names(dat))) {
+    cat("Skipping because required columns were not found.\n")
+    print(names(dat))
+    next
+  }
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  # Filter to positive KU/KUF betas and p-value thresholds
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_beta]] > 0 &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < hatoum_thresh,
+  ]
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  khat_n_label <- ifelse(
+    grepl("^ku_", pair_name),
+    "KU N = 33,210",
+    "KUF N = 25,869"
+  )
+
+  sud_n_label <- "SUD N = 1,025,550"
+
+  cat("Total SNPs:", nrow(dat), "\n")
+  cat("Filtered SNPs:", nrow(dat_filt), "\n")
+
+  plot_dat <- if (nrow(dat_filt) >= 3) {
+    dat_filt
+  } else {
+    dat[
+      !is.na(dat[[x_beta]]) &
+        !is.na(dat[[y_beta]]) &
+        !is.na(dat[[x_p]]) &
+        !is.na(dat[[y_p]]) &
+        dat[[x_beta]] > 0,
+    ]
+  }
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NGAP P < ", ku_thresh, " | Hatoum P < ", hatoum_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  # SNPs to highlight
+  plot_dat$highlight <- plot_dat[[x_p]] < ku_sug_thresh
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_point(
+      data = subset(plot_dat, highlight),
+      color = "red",
+      size = 2.5
+    ) +
+    geom_text_repel(
+      data = subset(plot_dat, highlight),
+      aes(label = khat_marker),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.subtitle = element_text(size = 8)
+    ) +
+    labs(
+      title = paste0("NGAP: ", khat_trait, " x Hatoum Addiction European"),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        sud_n_label,
+        " | ",
+        plot_label,
+        " | SNPs = ", nrow(plot_dat),
+        " | r = ", round(pearson_r, 4),
+        " | Suggestive Threshold = ", ku_sug_thresh 
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = "Hatoum Addiction beta"
+    )
+
+  print(p)
+}
+
+```
+
+```{r}
+# Johnson: setup
+
+data_dir <- "/Users/nico/work/sud/johnson_lifted_harmonized"
+
+ku_thresh <- 1e-2
+johnson_thresh <- 1e-3
+ku_sug_thresh <- 1e-5
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_CUD_EUR_casecontrol_public_11\\.14\\.2020_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+cat("Files found:", length(files), "\n")
+print(basename(files))
+
+```
+
+```{r}
+# Johnson: KU/KUF positive beta comparison plots
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  is_ku <- grepl("^ku_", basename(file))
+
+  if (is_ku) {
+    khat_beta <- "beta_ku"
+    khat_p <- "p_ku"
+    khat_trait <- "Khat Use"
+    khat_n_label <- "KU N = 33,210"
+  } else {
+    khat_beta <- "beta_kuf"
+    khat_p <- "p_kuf"
+    khat_trait <- "Khat Use Frequency"
+    khat_n_label <- "KUF N = 25,869"
+  }
+
+  dat <- read.table(
+    file,
+    header = FALSE,
+    sep = "\t",
+    skip = 1,
+    fill = TRUE,
+    stringsAsFactors = FALSE,
+    col.names = c(
+      "khat_marker",
+      "CHR",
+      "BP",
+      "khat_A1",
+      "khat_A2",
+      khat_beta,
+      khat_p,
+      "johnson_marker",
+      "johnson_A1",
+      "johnson_A2",
+      "beta_CUD_EUR_casecontrol",
+      "beta_CUD_EUR_casecontrol_to_khat_A1",
+      "P",
+      "allele_match_status",
+      "SE",
+      "N",
+      "N_CAS",
+      "N_CON"
+    )
+  )
+
+  x_beta <- khat_beta
+  y_beta <- "beta_CUD_EUR_casecontrol_to_khat_A1"
+  x_p <- khat_p
+  y_p <- "P"
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  # Filter to positive KU/KUF betas and p-value thresholds
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_beta]] > 0 &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < johnson_thresh,
+  ]
+
+  cat("Total SNPs:", nrow(dat), "\n")
+  cat("Filtered SNPs:", nrow(dat_filt), "\n")
+
+  plot_dat <- if (nrow(dat_filt) >= 3) {
+    dat_filt
+  } else {
+    dat[
+      !is.na(dat[[x_beta]]) &
+        !is.na(dat[[y_beta]]) &
+        !is.na(dat[[x_p]]) &
+        !is.na(dat[[y_p]]) &
+        dat[[x_beta]] > 0,
+    ]
+  }
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NGAP P < ", ku_thresh, " | Johnson P < ", johnson_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  # SNPs to highlight
+  plot_dat$highlight <- plot_dat[[x_p]] < ku_sug_thresh
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_point(
+      data = subset(plot_dat, highlight),
+      color = "red",
+      size = 2.5
+    ) +
+    geom_text_repel(
+      data = subset(plot_dat, highlight),
+      aes(label = khat_marker),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.subtitle = element_text(size = 8)
+    ) +
+    labs(
+      title = paste0("NGAP ", khat_trait, " x Johnson CUD European Case-Control"),
+      subtitle = paste0(
+        khat_n_label,
+        " | CUD N = 357,806",
+        " | ",
+        plot_label,
+        " | SNPs = ", nrow(plot_dat),
+        " | r = ", round(pearson_r, 4),
+        " | Suggestive Threshold = ", ku_sug_thresh
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = "Johnson CUD Beta"
+    )
+
+  print(p)
+}
+
+# output labels:
+# Full public: Everyone
+# Case-control: Includes unrelated individuals
+```
+
+```{r}
+# Levey: setup
+
+data_dir <- "/Users/nico/work/sud/levey_lifted_harmonized"
+
+levey_thresh <- 1e-3
+ku_thresh <- 1e-2
+ku_sug_thresh <- 1e-5
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_(AFR|EUR)_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+cat("Number of files found:", length(files), "\n")
+print(basename(files))
+```
+
+```{r}
+# Levey: beta comparison plots
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "pval"
+
+  cat("x_beta:", x_beta, "\n")
+  cat("y_beta:", y_beta, "\n")
+  cat("x_p:", x_p, "\n")
+  cat("y_p:", y_p, "\n")
+
+  stopifnot(
+    length(x_beta) == 1,
+    length(y_beta) == 1,
+    length(x_p) == 1,
+    y_p %in% names(dat)
+  )
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  # Filter to positive KU/KUF betas and p-value thresholds
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_beta]] > 0 &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < levey_thresh,
+  ]
+
+  cat("Total SNPs:", nrow(dat), "\n")
+  cat("Filtered SNPs:", nrow(dat_filt), "\n")
+
+  plot_dat <- if (nrow(dat_filt) >= 3) {
+    dat_filt
+  } else {
+    dat[
+      !is.na(dat[[x_beta]]) &
+        !is.na(dat[[y_beta]]) &
+        !is.na(dat[[x_p]]) &
+        !is.na(dat[[y_p]]) &
+        dat[[x_beta]] > 0,
+    ]
+  }
+
+  # SNPs to highlight
+  plot_dat$highlight <- plot_dat[[x_p]] < ku_sug_thresh
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  ancestry_label <- ifelse(
+    grepl("_AFR_", pair_name),
+    "African",
+    "European"
+  )
+
+  levey_trait <- paste0("Levey ", ancestry_label)
+
+  cud_n_label <- ifelse(
+    ancestry_label == "African",
+    "CUD N = 123,208",
+    "CUD N = 886,025"
+  )
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NeuroGAP P < ", ku_thresh, " | Levey P < ", levey_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_point(
+      data = subset(plot_dat, highlight),
+      color = "red",
+      size = 2.5
+    ) +
+    geom_text_repel(
+      data = subset(plot_dat, highlight),
+      aes(label = khat_marker),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.subtitle = element_text(size = 8)
+    ) +
+    labs(
+      title = paste0("NGAP: ", khat_trait, " x ", levey_trait, " CUD"),
+      subtitle = paste0(
+        cud_n_label,
+        " | ",
+        plot_label,
+        " | SNPs = ", nrow(plot_dat),
+        " | r = ", round(pearson_r, 4),
+        " | Suggestive Threshold = ", ku_sug_thresh
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = "CUD Beta"
+    )
+
+  print(p)
+}
+```
+
+
+```{r}
+# Liu: Read ins 
+
+data_dir <- "/Users/nico/work/sud/liu_lifted_harmonized"
+
+liu_thresh <- 1e-3
+ku_thresh <- 1e-2
+ku_sug_thresh <- 1e-5
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_.+_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+length(files)
+basename(files)
+
+```
+
+```{r}
+# Liu: beta comparisons
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "PVALUE"
+
+  cat("x_beta:", x_beta, "\n")
+  cat("y_beta:", y_beta, "\n")
+  cat("x_p:", x_p, "\n")
+  cat("y_p:", y_p, "\n")
+
+  stopifnot(
+    length(x_beta) == 1,
+    length(y_beta) == 1,
+    length(x_p) == 1,
+    y_p %in% names(dat)
+  )
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  # Filter to positive KU/KUF betas and p-value thresholds
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_beta]] > 0 &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < liu_thresh,
+  ]
+
+  cat("Total SNPs:", nrow(dat), "\n")
+  cat("Filtered SNPs:", nrow(dat_filt), "\n")
+
+  plot_dat <- if (nrow(dat_filt) >= 3) {
+    dat_filt
+  } else {
+    dat[
+      !is.na(dat[[x_beta]]) &
+        !is.na(dat[[y_beta]]) &
+        !is.na(dat[[x_p]]) &
+        !is.na(dat[[y_p]]) &
+        dat[[x_beta]] > 0,
+    ]
+  }
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NeuroGAP P < ", ku_thresh, " | Liu P < ", liu_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  # SNPs to highlight
+  plot_dat$highlight <- plot_dat[[x_p]] < ku_sug_thresh
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  liu_trait <- sub("^(ku|kuf)_", "", pair_name)
+  liu_trait <- sub("_harmonized$", "", liu_trait)
+
+  liu_trait <- switch(
+    liu_trait,
+    AgeofInitiation = "Age of Initiation",
+    AgeOfInitiation_WithoutUKB = "Age of Initiation (No UKBB)",
+    CigarettesPerDay = "Cigarettes per Day",
+    CigarettesPerDay_WithoutUKB = "Cigarettes per Day (No UKBB)",
+    DrinksPerWeek = "Drinks per Week",
+    DrinksPerWeek_WithoutUKB = "Drinks per Week (No UKB)",
+    SmokingInitiation = "Smoking Initiation",
+    SmokingInitiation_WithoutUKB = "Smoking Initiation (No UKBB)",
+    SmokingCessation = "Smoking Cessation",
+    SmokingCessation_WithoutUKB = "Smoking Cessation (No UKBB)",
+    liu_trait
+  )
+
+  khat_n_label <- ifelse(
+    grepl("^ku_", pair_name),
+    "KU N = 33,210",
+    "KUF N = 25,869"
+  )
+
+  liu_n_lookup <- c(
+  "Smoking Initiation" = "632,802",
+  "Smoking Initiation (No UKB)" = "559,471",
+  "Smoking Cessation" = "312,821",
+  "Smoking Cessation (No UKB)" = "281,073",
+  "Drinks per Week" = "537,349",
+  "Drinks per Week (No UKB)" = "477,350",
+  "Cigarettes per Day" = "263,954",
+  "Cigarettes per Day (No UKB)" = "242,429",
+  "Age of Initiation" = "262,990",
+  "Age of Initiation (No UKB)" = "240,603"
+  )
+
+  liu_n_label <- if (liu_trait %in% names(liu_n_lookup)) {
+    paste0(liu_trait, " N = ", liu_n_lookup[[liu_trait]])
+  } else {
+    paste0(liu_trait, " N = NA")
+  }
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_point(
+      data = subset(plot_dat, highlight),
+      color = "red",
+      size = 2.5
+    ) +
+    geom_text_repel(
+      data = subset(plot_dat, highlight),
+      aes(label = khat_marker),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 10),
+      plot.subtitle = element_text(size = 7)
+    ) +
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x Liu: ",
+        liu_trait
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        liu_n_label,
+        " | ",
+        plot_label,
+        " | SNPs = ", nrow(plot_dat),
+        " | r = ", round(pearson_r, 4),
+        " | Suggestive: p<", ku_sug_thresh
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = paste0(liu_trait, " beta")
+    )
+
+  print(p)
+}
+```
+
+```{r}
+# Saunders: setup
+
+data_dir <- "/Users/nico/work/sud/saunders_lifted_harmonized"
+
+saunders_thresh <- 1e-3
+ku_thresh <- 1e-2
+ku_sug_thresh
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_(AgeSmk|CigDay|DrnkWk|SmkCes|SmkInit)_(AFR|AMR|EAS|EUR)_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+cat("Number of files found:", length(files), "\n")
+print(basename(files))
+```
+
+```{r}
+# Saunders: beta comparison plots
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "P"
+
+  cat("x_beta:", x_beta, "\n")
+  cat("y_beta:", y_beta, "\n")
+  cat("x_p:", x_p, "\n")
+  cat("y_p:", y_p, "\n")
+
+  stopifnot(
+    length(x_beta) == 1,
+    length(y_beta) == 1,
+    length(x_p) == 1,
+    y_p %in% names(dat)
+  )
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  # Filter to positive KU/KUF betas and p-value thresholds
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_beta]] > 0 &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < saunders_thresh,
+  ]
+
+  cat("Total SNPs:", nrow(dat), "\n")
+  cat("Filtered SNPs:", nrow(dat_filt), "\n")
+
+  plot_dat <- if (nrow(dat_filt) >= 3) {
+    dat_filt
+  } else {
+    dat[
+      !is.na(dat[[x_beta]]) &
+        !is.na(dat[[y_beta]]) &
+        !is.na(dat[[x_p]]) &
+        !is.na(dat[[y_p]]) &
+        dat[[x_beta]] > 0,
+    ]
+  }
+
+  # SNPs to highlight in red
+  plot_dat$highlight <- plot_dat[[x_p]] < ku_sug_thresh
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  khat_n_label <- ifelse(
+    grepl("^ku_", pair_name),
+    "KU N = 33,210",
+    "KUF N = 25,869"
+  )
+
+  saunders_raw <- sub("^(ku|kuf)_", "", pair_name)
+  saunders_raw <- sub("_harmonized$", "", saunders_raw)
+
+  ancestry <- sub("^.*_(AFR|AMR|EAS|EUR)$", "\\1", saunders_raw)
+  trait_raw <- sub("_(AFR|AMR|EAS|EUR)$", "", saunders_raw)
+
+  ancestry_label <- switch(
+    ancestry,
+    AFR = "AFR",
+    AMR = "AMR",
+    EAS = "EAS",
+    EUR = "EUR",
+    ancestry
+  )
+
+  trait_label <- switch(
+    trait_raw,
+    AgeSmk = "Age SmkInit",
+    CigDay = "Cigs per Day",
+    DrnkWk = "Drnks per Week",
+    SmkCes = "Age SmkCess",
+    SmkInit = "SmkInit",
+    trait_raw
+  )
+
+  saunders_n <- case_when(
+    trait_raw == "SmkInit" & ancestry == "EUR" ~ 805431,
+    trait_raw == "SmkInit" & ancestry == "AMR" ~ 286026,
+    trait_raw == "SmkInit" & ancestry == "AFR" ~ 119589,
+    trait_raw == "SmkInit" & ancestry == "EAS" ~ 296395,
+
+    trait_raw == "AgeSmk" & ancestry == "EUR" ~ 323836,
+    trait_raw == "AgeSmk" & ancestry == "AMR" ~ 33914,
+    trait_raw == "AgeSmk" & ancestry == "AFR" ~ 17508,
+    trait_raw == "AgeSmk" & ancestry == "EAS" ~ 63353,
+
+    trait_raw == "CigDay" & ancestry == "EUR" ~ 326497,
+    trait_raw == "CigDay" & ancestry == "AMR" ~ 35129,
+    trait_raw == "CigDay" & ancestry == "AFR" ~ 20157,
+    trait_raw == "CigDay" & ancestry == "EAS" ~ 108275,
+
+    trait_raw == "SmkCes" & ancestry == "EUR" ~ 388313,
+    trait_raw == "SmkCes" & ancestry == "AMR" ~ 90525,
+    trait_raw == "SmkCes" & ancestry == "AFR" ~ 34970,
+    trait_raw == "SmkCes" & ancestry == "EAS" ~ 121859,
+
+    trait_raw == "DrnkWk" & ancestry == "EUR" ~ 666978,
+    trait_raw == "DrnkWk" & ancestry == "AMR" ~ 274707,
+    trait_raw == "DrnkWk" & ancestry == "AFR" ~ 95343,
+    trait_raw == "DrnkWk" & ancestry == "EAS" ~ 160775,
+
+    TRUE ~ NA_real_
+  )
+
+  saunders_n_label <- paste0(
+    trait_label,
+    " ",
+    ancestry,
+    " N = ",
+    format(saunders_n, big.mark = ",", scientific = FALSE)
+  )
+
+  saunders_label <- paste0(
+    "Saunders ",
+    trait_label,
+    " ",
+    ancestry_label
+  )
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0("NGAP P < ", ku_thresh, " | Saunders P < ", saunders_thresh)
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_point(
+      data = subset(plot_dat, highlight),
+      color = "red",
+      size = 2.5
+    ) +
+    geom_text_repel(
+      data = subset(plot_dat, highlight),
+      aes(label = khat_marker),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 10),
+      plot.subtitle = element_text(size = 7)
+    ) +
+    labs(
+      title = paste0("NGAP: ", khat_trait, " x ", saunders_label),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        saunders_n_label,
+        " | ",
+        plot_label,
+        " | SNPs = ", nrow(plot_dat),
+        " | r = ", round(pearson_r, 4),
+        " | Suggestive Threshold = ", ku_sug_thresh
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = paste0(trait_raw, " beta")
+    )
+
+  print(p)
+}
+
+# Note: Data for EUR doesn't include 23andMe
+```
+
+```{r}
+# Walters: setup
+
+data_dir <- "/Users/nico/work/sud/walters_lifted_harmonized"
+
+walters_thresh <- 1e-3
+ku_thresh <- 1e-2
+ku_sug_thresh <- 1e-5
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_pgc_alcdep_trans_fe_unrel_geno_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+cat("Number of files found:", length(files), "\n")
+print(basename(files))
+```
+
+```{r}
+# Walters: positive KU/KUF beta comparison plots
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE
+  )
+
+  x_beta <- grep("^beta_ku$|^beta_kuf$", names(dat), value = TRUE)
+  y_beta <- grep("_to_khat_A1$", names(dat), value = TRUE)
+
+  x_p <- grep("^p_ku$|^p_kuf$", names(dat), value = TRUE)
+  y_p <- "P"
+
+  cat("x_beta:", x_beta, "\n")
+  cat("y_beta:", y_beta, "\n")
+  cat("x_p:", x_p, "\n")
+  cat("y_p:", y_p, "\n")
+
+  stopifnot(
+    length(x_beta) == 1,
+    length(y_beta) == 1,
+    length(x_p) == 1,
+    y_p %in% names(dat)
+  )
+
+  dat[[x_beta]] <- as.numeric(dat[[x_beta]])
+  dat[[y_beta]] <- as.numeric(dat[[y_beta]])
+  dat[[x_p]] <- as.numeric(dat[[x_p]])
+  dat[[y_p]] <- as.numeric(dat[[y_p]])
+
+  # Filter to positive KU/KUF betas and p-value thresholds
+  dat_filt <- dat[
+    !is.na(dat[[x_beta]]) &
+      !is.na(dat[[y_beta]]) &
+      !is.na(dat[[x_p]]) &
+      !is.na(dat[[y_p]]) &
+      dat[[x_beta]] > 0 &
+      dat[[x_p]] < ku_thresh &
+      dat[[y_p]] < walters_thresh,
+  ]
+
+  cat("Total SNPs:", nrow(dat), "\n")
+  cat("Filtered SNPs:", nrow(dat_filt), "\n")
+
+  plot_dat <- if (nrow(dat_filt) >= 3) {
+    dat_filt
+  } else {
+    dat[
+      !is.na(dat[[x_beta]]) &
+        !is.na(dat[[y_beta]]) &
+        !is.na(dat[[x_p]]) &
+        !is.na(dat[[y_p]]) &
+        dat[[x_beta]] > 0,
+    ]
+  }
+
+  # SNPs to highlight in red
+  plot_dat$highlight <- plot_dat[[x_p]] < ku_sug_thresh
+
+  pair_name <- tools::file_path_sans_ext(basename(file))
+
+  khat_trait <- ifelse(
+    grepl("^ku_", pair_name),
+    "Khat Use",
+    "Khat Use Frequency"
+  )
+
+  khat_n_label <- ifelse(
+    grepl("^ku_", pair_name),
+    "KU N = 33,210",
+    "KUF N = 25,869"
+  )
+
+  walters_label <- "Walters Alcohol Dependence"
+
+  alcdep_n_label <- "ALCDep N = 52,848"
+
+  plot_label <- if (nrow(dat_filt) >= 3) {
+    paste0(
+      "NeuroGAP P < ", ku_thresh,
+      " | Walters P < ", walters_thresh
+    )
+  } else {
+    "Unfiltered SNPs shown because fewer than 3 SNPs passed filters"
+  }
+
+  pearson_r <- cor(
+    plot_dat[[x_beta]],
+    plot_dat[[y_beta]],
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+    geom_point(alpha = 0.5) +
+    geom_point(
+      data = subset(plot_dat, highlight),
+      color = "red",
+      size = 2.5
+    ) +
+    geom_text_repel(
+      data = subset(plot_dat, highlight),
+      aes(label = khat_marker),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 7),
+      plot.subtitle = element_text(size = 4)
+    ) +
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x ",
+        walters_label
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        alcdep_n_label,
+        " | ",
+        plot_label,
+        " | SNPs = ",
+        nrow(plot_dat),
+        " | r = ",
+        round(pearson_r, 4),
+        " | Suggestive Threshold = ",
+        ku_sug_thresh
+      ),
+      x = paste0(khat_trait, " beta"),
+      y = paste0(
+        walters_label,
+        " beta"
+      )
+    )
+
+  print(p)
+}
+```
+

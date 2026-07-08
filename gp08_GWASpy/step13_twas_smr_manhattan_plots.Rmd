@@ -1,0 +1,267 @@
+---
+title: "smr_gtex_manhattan_plots"
+author: "Nico Matthew S. Valencia"
+date: "2026-04-16"
+output: html_document
+---
+
+```{r}
+install.packages("data.table") 
+install.packages("dplyr") 
+install.packages("qqman") 
+install.packages("ggplot2") 
+install.packages("poolr")
+```
+
+```{r}
+library(data.table)
+library(dplyr)
+library(qqman)
+library(ggplot2)
+library(poolr)
+
+```
+
+```{r}
+smr_dir <- "/Users/nico/work/khat_gwas/smr_output"
+
+ku_files <- list.files(
+  smr_dir,
+  pattern = "^ku_.*\\.smr$",
+  full.names = TRUE
+)
+
+kuf_files <- list.files(
+  smr_dir,
+  pattern = "^kuf_.*\\.smr$",
+  full.names = TRUE
+)
+
+smr_files <- c(ku_files, kuf_files)
+
+length(smr_files)
+smr_files
+```
+
+```{r}
+# Test viewing of Manhattan plots w/ bonferroni pval
+f <- "/Users/nico/work/khat_gwas/smr_output/ku_Artery_Aorta_allchr.smr"
+
+df <- fread(f)
+
+df_plot <- data.frame(
+  SNP = df$topSNP,
+  CHR = as.numeric(df$topSNP_chr),
+  BP  = as.numeric(df$topSNP_bp),
+  P   = as.numeric(df$p_SMR)
+)
+
+df_plot <- df_plot[!is.na(df_plot$P) & df_plot$P > 0, ]
+
+threshold <- 0.05 / nrow(df_plot)
+
+manhattan(
+  df_plot,
+  chr = "CHR",
+  bp = "BP",
+  snp = "SNP",
+  p = "P",
+  genomewideline = -log10(threshold),
+  suggestiveline = FALSE,
+  main = basename(f)
+)
+```
+
+```{r}
+# Manhattan plots: bonferroni
+
+files <- smr_files
+
+out_dir <- "/Users/nico/work/khat_gwas/smr_output/manhattan_bonf"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+for (f in files) {
+
+  message("Processing: ", basename(f))
+
+  df <- fread(f)
+
+  df_plot <- data.frame(
+    SNP = make.unique(as.character(df$topSNP)),
+    CHR = as.numeric(df$topSNP_chr),
+    BP  = as.numeric(df$topSNP_bp),
+    P   = as.numeric(df$p_SMR)
+  )
+
+  df_plot <- df_plot[
+    !is.na(df_plot$CHR) &
+      !is.na(df_plot$BP) &
+      !is.na(df_plot$P) &
+      is.finite(df_plot$P) &
+      df_plot$P > 0 &
+      df_plot$P <= 1,
+  ]
+
+  if (nrow(df_plot) == 0) {
+    message("Skipping empty file: ", basename(f))
+    next
+  }
+
+  bonf_pval <- 0.05 / nrow(df_plot)
+
+  group <- ifelse(grepl("^kuf_", basename(f)), "KUF_AllVars", "KU_AllVars")
+
+  tissue <- basename(f)
+  tissue <- sub("^ku_", "", tissue)
+  tissue <- sub("^kuf_", "", tissue)
+  tissue <- sub("_allchr\\.smr$", "", tissue)
+
+  plot_title <- paste0(
+    group,
+    ": ",
+    tissue,
+    " | Bonf. p = ",
+    signif(bonf_pval, 3)
+  )
+
+  out_png <- file.path(
+    out_dir,
+    paste0(group, "_", tissue, "_manhattan.png")
+  )
+
+  # show in notebook
+  manhattan(
+    df_plot,
+    chr = "CHR",
+    bp = "BP",
+    snp = "SNP",
+    p = "P",
+    genomewideline = -log10(bonf_pval),
+    suggestiveline = FALSE,
+    main = plot_title
+  )
+
+  # save PNG
+  png(out_png, width = 1400, height = 700)
+
+  manhattan(
+    df_plot,
+    chr = "CHR",
+    bp = "BP",
+    snp = "SNP",
+    p = "P",
+    genomewideline = -log10(bonf_pval),
+    suggestiveline = FALSE,
+    main = plot_title
+  )
+
+  dev.off()
+
+  message("Saved: ", out_png)
+}
+
+```
+```{r}
+# Manhattan plots: FDR
+
+out_dir <- "/Users/nico/work/khat_gwas/smr_output/manhattan_fdr_highlight"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+fdr_alpha <- 0.05
+
+for (f in smr_files) {
+
+  message("Processing: ", basename(f))
+
+  df <- fread(f)
+
+  df_plot <- data.frame(
+    SNP = make.unique(as.character(df$topSNP)),
+    CHR = as.numeric(df$topSNP_chr),
+    BP  = as.numeric(df$topSNP_bp),
+    P   = as.numeric(df$p_SMR),
+    Gene = as.character(df$Gene),
+    probeID = as.character(df$probeID)
+  )
+
+  df_plot <- df_plot[
+    !is.na(df_plot$CHR) &
+      !is.na(df_plot$BP) &
+      !is.na(df_plot$P) &
+      is.finite(df_plot$P) &
+      df_plot$P > 0 &
+      df_plot$P <= 1,
+  ]
+
+  if (nrow(df_plot) == 0) {
+    message("Skipping empty file: ", basename(f))
+    next
+  }
+
+  df_plot$FDR <- p.adjust(df_plot$P, method = "BH")
+  sig_snps <- df_plot$SNP[df_plot$FDR <= fdr_alpha]
+
+  group <- ifelse(grepl("^kuf_", basename(f)), "KUF_AllVars", "KU_AllVars")
+
+  tissue <- basename(f)
+  tissue <- sub("^ku_", "", tissue)
+  tissue <- sub("^kuf_", "", tissue)
+  tissue <- sub("_allchr\\.smr$", "", tissue)
+
+  n_sig <- length(sig_snps)
+
+  plot_title <- paste0(
+    group,
+    ": ",
+    tissue,
+    " | BH-FDR <= ",
+    fdr_alpha,
+    " hits = ",
+    n_sig
+  )
+
+  out_png <- file.path(
+    out_dir,
+    paste0(group, "_", tissue, "_manhattan_FDR_highlight.png")
+  )
+
+  # Show in notebook
+  manhattan(
+    df_plot,
+    chr = "CHR",
+    bp = "BP",
+    snp = "SNP",
+    p = "P",
+    genomewideline = FALSE,
+    suggestiveline = FALSE,
+    highlight = sig_snps,
+    main = plot_title,
+    ylab = expression(-log[10]("SMR p-value"))
+  )
+
+  # Save PNG
+  png(out_png, width = 1400, height = 700)
+
+  manhattan(
+    df_plot,
+    chr = "CHR",
+    bp = "BP",
+    snp = "SNP",
+    p = "P",
+    genomewideline = FALSE,
+    suggestiveline = FALSE,
+    highlight = sig_snps,
+    main = plot_title,
+    ylab = expression(-log[10]("SMR p-value"))
+  )
+
+  dev.off()
+
+  message("Saved: ", out_png)
+}
+```
+
+```{r}
+# will work on Li-Ji
+```
+

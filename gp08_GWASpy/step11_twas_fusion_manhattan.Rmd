@@ -1,0 +1,618 @@
+---
+title: "FUSION Manhattan Plots"
+author: "Nico Valencia"
+date: "2026-04-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(data.table)
+library(dplyr)
+library(topr)
+library(qqman)
+library(ggplot2)
+library(stringr)
+library(purrr)
+
+```
+
+
+```{r}
+base_dir <- "/Users/nvalenci/Desktop/work/khat_gwas/fusion/out/studysite_covarAll"
+
+# Recursively find ALL .dat files
+fusion_files <- list.files(
+  path = base_dir,
+  pattern = "\\.dat$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+# Number of files found
+length(fusion_files)
+
+# Print all file paths
+fusion_files
+```
+
+```{r}
+# number of rows --> bonferroni multiple hypothesis adjustment
+fusion_list <- lapply(fusion_files, read.delim)
+```
+
+```{r}
+total_rows <- sum(sapply(fusion_list, nrow))
+cat("Number of tests performed: ", total_rows)
+```
+
+```{r}
+global_bonfP <- 0.05/total_rows
+cat("Bonferroni adjusted pval for all TWAS: ", 0.05/total_rows)
+
+```
+
+```{r}
+
+
+base_dir <- "/Users/nvalenci/Desktop/work/khat_gwas/fusion/out/studysite_covarAll"
+
+# recursively find all FUSION result files
+smr_files <- list.files(
+  base_dir,
+  pattern = "\\.smr$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+cat("Number of FUSION files found:", length(smr_files), "\n")
+
+results_list <- list()
+
+for (f in smr_files) {
+
+  cat("\nProcessing:", f, "\n")
+
+  # safely read file
+  dt <- tryCatch(
+    fread(f),
+    error = function(e) NULL
+  )
+
+  if (is.null(dt)) {
+    cat("Could not read:", f, "\n")
+    next
+  }
+
+  # skip empty files
+  if (nrow(dt) == 0) {
+    cat("Empty file:", f, "\n")
+    next
+  }
+
+  # identify SMR p-value column
+  smr_p_col <- c("p_SMR", "pSMR", "P_SMR")[
+    c("p_SMR", "pSMR", "P_SMR") %in% names(dt)
+  ][1]
+
+  if (is.na(smr_p_col)) {
+    cat("No SMR p-value column found:", f, "\n")
+    next
+  }
+
+  # identify coloc PP4 column if present
+  pp4_col <- c("colocPP4", "PP.H4.abf", "PP4", "pp4")[
+    c("colocPP4", "PP.H4.abf", "PP4", "pp4") %in% names(dt)
+  ][1]
+
+  # bonferroni threshold based on UNIQUE probes/genes
+  n_tests <- n_distinct(
+    dt$ProbeID %||% dt$probeID %||% dt$Gene %||% seq_len(nrow(dt))
+  )
+
+
+  sig_dt <- dt %>%
+    filter(.data[[smr_p_col]] < global_bonfP)
+
+  if (nrow(sig_dt) == 0) {
+    cat("No Bonferroni-significant signals\n")
+    next
+  }
+
+
+  cat("Significant rows:", nrow(sig_dt), "\n")
+
+  # annotate source file
+  sig_dt$source_file <- basename(f)
+  sig_dt$full_path <- f
+  sig_dt$bonf_threshold <- global_bonfP
+
+  # pull useful columns if they exist
+  keep_cols <- c(
+    "ProbeID",
+    "Gene",
+    "gene",
+    smr_p_col,
+    "p_HEIDI",
+    "nsnp_HEIDI",
+    pp4_col,
+    "source_file",
+    "full_path",
+    "global_bonfP"
+  )
+
+  keep_cols <- keep_cols[keep_cols %in% names(sig_dt)]
+
+  results_list[[f]] <- sig_dt[, ..keep_cols]
+}
+
+final_results <- bind_rows(results_list)
+
+cat("\n=========================\n")
+cat("FINAL SIGNIFICANT RESULTS\n")
+cat("=========================\n")
+
+print(final_results)
+
+# optional: save results
+fwrite(
+  final_results,
+  file.path(base_dir, "significant_smr_results_with_colocPP4.tsv"),
+  sep = "\t"
+)
+```
+
+```{r}
+
+# KU x GTExV8 FUSION Manhattan plots
+
+
+ku_files <- fusion_files[grepl("/ku/", fusion_files)]
+
+for (f in ku_files) {
+
+  df <- fread(f)
+
+  plot_df <- df %>%
+    transmute(
+      SNP = ID,
+      CHR = as.integer(CHR),
+      BP = (as.numeric(P0) + as.numeric(P1)) / 2,
+      P = as.numeric(TWAS.P)
+    ) %>%
+    filter(
+      !is.na(SNP),
+      !is.na(CHR),
+      !is.na(BP),
+      !is.na(P),
+      P > 0
+    )
+
+  # Extract only tissue/cell type
+  tissue <- basename(f)
+
+  tissue <- gsub("^.*GTExv8\\.ALL\\.", "", tissue)
+  tissue <- gsub("\\.all_chr\\.dat$", "", tissue)
+
+ 
+
+  plot_title <- paste0(
+    tissue,
+    " | Bonf. Pval = ",
+    signif(global_bonfP, 3)
+  )
+
+  manhattan(
+    plot_df,
+    annotateTop = FALSE,
+    main = plot_title
+  )
+}
+
+
+```
+```{r}
+
+# KUF x GTExV8 FUSION Manhattan PLots
+
+kuf_files <- fusion_files[grepl("/kuf/", fusion_files)]
+
+for (f in kuf_files) {
+
+  df <- fread(f)
+
+  plot_df <- df %>%
+    transmute(
+      SNP = ID,
+      CHR = as.integer(CHR),
+      BP = (as.numeric(P0) + as.numeric(P1)) / 2,
+      P = as.numeric(TWAS.P)
+    ) %>%
+    filter(
+      !is.na(SNP),
+      !is.na(CHR),
+      !is.na(BP),
+      !is.na(P),
+      P > 0
+    )
+
+  tissue <- basename(f)
+
+  tissue <- gsub("^.*GTExv8\\.ALL\\.", "", tissue)
+  tissue <- gsub("\\.all_chr\\.dat$", "", tissue)
+
+
+
+  plot_title <- paste0(
+    tissue,
+    " | Bonf. Pval = ",
+    signif(global_bonfP, 3)
+  )
+
+  manhattan(
+    plot_df,
+    annotateTop = FALSE,
+    main = plot_title
+  )
+}
+```
+
+```{r}
+# Analyzing colocalization data (summed up for each tissue)
+
+# Read & Combine all fusion files
+read_fusion_set <- function(files, phenotype_label) {
+  rbindlist(
+    lapply(files, function(f) {
+      df <- fread(f)
+
+      # Read in .dat file
+      tissue <- basename(f)
+      tissue <- gsub("^.*GTExv8\\.ALL\\.", "", tissue)
+      tissue <- gsub("\\.all_chr\\.dat$", "", tissue)
+      
+      # add logP and convert values to numeric
+      df %>%
+        mutate(
+          phenotype = phenotype_label,
+          tissue = tissue,
+          TWAS.P = as.numeric(TWAS.P),
+          TWAS.Z = as.numeric(TWAS.Z),
+          COLOC.PP0 = as.numeric(COLOC.PP0),
+          COLOC.PP1 = as.numeric(COLOC.PP1),
+          COLOC.PP2 = as.numeric(COLOC.PP2),
+          COLOC.PP3 = as.numeric(COLOC.PP3),
+          COLOC.PP4 = as.numeric(COLOC.PP4),
+          # logP required for volcano plot
+          logP = -log10(TWAS.P)
+        )
+    }),
+    fill = TRUE
+  )
+}
+```
+
+```{r}
+# split KU and KUF files based on folder names
+ku_files <- fusion_files[grepl("/ku/", fusion_files)]
+kuf_files <- fusion_files[grepl("/kuf/", fusion_files)]
+
+ku_all <- read_fusion_set(ku_files, "KU")
+kuf_all <- read_fusion_set(kuf_files, "KUF")
+```
+
+```{r}
+# create combined datasets for each respective GWAS
+ku_all <- read_fusion_set(ku_files, "KU")
+kuf_all <- read_fusion_set(kuf_files, "KUF")
+
+# Remove missing/invalid rows relative to each argument
+ku_noNA <- ku_all %>%
+  filter(
+    !is.na(TWAS.P),
+    TWAS.P > 0,
+    !is.na(logP)
+  )
+
+kuf_noNA <- kuf_all %>%
+  filter(
+    !is.na(TWAS.P),
+    TWAS.P > 0,
+    !is.na(logP)
+  )
+
+
+```
+
+```{r}
+# KU: Volcano plot of COLOC PP4
+
+
+ggplot(
+  ku_noNA,
+  aes(
+    x = TWAS.Z,
+    y = logP,
+    color = COLOC.PP4
+  )
+) +
+
+  geom_point(alpha = 0.6, size = 1) +
+
+  geom_hline(
+    yintercept = -log10(global_bonfP),
+    linetype = "dashed",
+    color = "red"
+  ) +
+
+  # Heat scale for PP4 values
+  scale_color_viridis_c(
+    na.value = "gray75",
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "KU: Volcano Plot for All TWAS Results",
+    subtitle = paste0(
+      "N = ", nrow(ku_noNA),
+      " genes/tests | Gray points = missing PP4"
+    ),
+    x = "TWAS Z-score",
+    y = expression(-log[10](TWAS.P)),
+    color = "COLOC PP4"
+  )
+# X-axis = TWAS effect direction/strength
+# Y-axis = TWAS.P
+# Color = probability of shared causality variant (i.e., being PP4)
+```
+
+```{r}
+# KUF: volcano plot for ALL TWAS results
+
+ggplot(
+  kuf_noNA,
+  aes(
+    x = TWAS.Z,
+    y = logP,
+    color = COLOC.PP4
+  )
+) +
+
+  geom_point(alpha = 0.6, size = 1) +
+
+  geom_hline(
+    yintercept = -log10(kuf_bonf),
+    linetype = "dashed",
+    color = "red"
+  ) +
+
+  scale_color_viridis_c(
+    na.value = "gray75",
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "KUF: Volcano Plot for All TWAS Results",
+    subtitle = paste0(
+      "N = ", nrow(kuf_noNA),
+      " genes/tests | Gray points = missing PP4"
+    ),
+    x = "TWAS Z-score",
+    y = expression(-log[10](TWAS.P)),
+    color = "COLOC PP4"
+  )
+
+# X-axis = TWAS effect direction/strength
+# Y-axis = TWAS.P
+# Color = probability of shared causality variant (i.e., being PP4)
+```
+
+```{r fig.width=14, fig.height=3}
+# Density plots: KU and KUF transformations
+
+ku_pp_long <- ku_all %>%
+  select(
+    phenotype,
+    tissue,
+    ID,
+    COLOC.PP0,
+    COLOC.PP1,
+    COLOC.PP2,
+    COLOC.PP3,
+    COLOC.PP4
+  ) %>%
+  pivot_longer(
+    cols = starts_with("COLOC.PP"),
+    names_to = "PP_type",
+    values_to = "PP"
+  ) %>%
+  filter(!is.na(PP))
+
+# KUF: transform COLOC PP columns into long format
+kuf_pp_long <- kuf_all %>%
+  select(
+    phenotype,
+    tissue,
+    ID,
+    COLOC.PP0,
+    COLOC.PP1,
+    COLOC.PP2,
+    COLOC.PP3,
+    COLOC.PP4
+  ) %>%
+  pivot_longer(
+    cols = starts_with("COLOC.PP"),
+    names_to = "PP_type",
+    values_to = "PP"
+  ) %>%
+  filter(!is.na(PP))
+
+```
+
+```{r fig.width=16, fig.height=2.5}
+
+# KU density plots side-by-side
+ggplot(
+  ku_pp_long,
+  aes(x = PP)
+) +
+  geom_density(
+    fill = "steelblue",
+    alpha = 0.5,
+    linewidth = 0.6
+  ) +
+
+  # Put PP0–PP4 next to each other horizontally
+  facet_wrap(
+    ~ PP_type,
+    nrow = 1,
+    scales = "free_y"
+  ) +
+
+  theme_bw() +
+
+  # Compress overall appearance
+  theme(
+    strip.text = element_text(size = 9),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10),
+    plot.title = element_text(size = 12)
+  ) +
+
+  labs(
+    title = "KU: COLOC Posterior Probability Densities",
+    x = "Posterior Probability",
+    y = "Density"
+  )
+
+```
+
+```{r fig.width=16, fig.height=2.5}
+
+# KUF density plots side-by-side
+ggplot(
+  kuf_pp_long,
+  aes(x = PP)
+) +
+  geom_density(
+    fill = "darkorange",
+    alpha = 0.5,
+    linewidth = 0.6
+  ) +
+
+  facet_wrap(
+    ~ PP_type,
+    nrow = 1,
+    scales = "free_y"
+  ) +
+
+  theme_bw() +
+
+  theme(
+    strip.text = element_text(size = 9),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10),
+    plot.title = element_text(size = 12)
+  ) +
+
+  labs(
+    title = "KUF: COLOC Posterior Probability Densities",
+    x = "Posterior Probability",
+    y = "Density"
+  )
+
+```
+
+
+```{r fig.width=7, fig.height=5}
+# KU: TWAS.P vs PP4 figure
+ggplot(
+  ku_noNA %>% filter(!is.na(COLOC.PP4)),
+  aes(
+    x = logP,
+    y = COLOC.PP4
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP4),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  # Bonferroni significance threshold
+  geom_vline(
+    xintercept = -log10(global_bonfP),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Common coloc threshold
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  scale_color_viridis_c(option = "viridis") +
+
+  theme_bw() +
+
+  labs(
+    title = "KU: TWAS Significance vs Colocalization",
+#    subtitle = "Upper-right = strongest colocalized TWAS signals",
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC PP4",
+    color = "PP4"
+  )
+
+```
+
+```{r fig.width=7, fig.height=5}
+
+ggplot(
+  kuf_noNA %>% filter(!is.na(COLOC.PP4)),
+  aes(
+    x = logP,
+    y = COLOC.PP4
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP4),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  geom_vline(
+    xintercept = -log10(global_bonfP),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  scale_color_viridis_c(option = "viridis") +
+
+  theme_bw() +
+
+  labs(
+    title = "KUF: TWAS Significance vs Colocalization",
+#    subtitle = "Upper-right = strongest colocalized TWAS signals",
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC PP4",
+    color = "PP4"
+  )
+
+```

@@ -1,0 +1,38 @@
+awk 'BEGIN {OFS="\t"}
+NR==1 {
+  for (i=1; i<=NF; i++) {
+    if ($i=="MarkerName") snp=i
+    if ($i=="Allele1") a1=i
+    if ($i=="Allele2") a2=i
+    if ($i=="Freq1") freq=i
+    if ($i=="Effect") b=i
+    if ($i=="StdErr") se=i
+    if ($i=="P-value") p=i
+    if ($i=="N") n=i
+  }
+  print "SNP","A1","A2","freq","b","se","p","N"
+  next
+}
+!seen[$snp]++ {
+  print $snp,$a1,$a2,$freq,$b,$se,$p,$n
+}' ku_gp08_meta_cleaned_with_N.txt > ku_gp08_meta_cleaned_with_N.smr.tsv
+
+
+awk 'BEGIN {OFS="\t"}
+NR==1 {
+  for (i=1; i<=NF; i++) {
+    if ($i=="MarkerName") snp=i
+    if ($i=="Allele1") a1=i
+    if ($i=="Allele2") a2=i
+    if ($i=="Freq1") freq=i
+    if ($i=="Effect") b=i
+    if ($i=="StdErr") se=i
+    if ($i=="P-value") p=i
+    if ($i=="N") n=i
+  }
+  print "SNP","A1","A2","freq","b","se","p","N"
+  next
+}
+!seen[$snp]++ {
+  print $snp,$a1,$a2,$freq,$b,$se,$p,$n
+}' kuf_gp08_meta_cleaned_with_N.tsv > kuf_gp08_meta_cleaned_with_N.smr.tsv
