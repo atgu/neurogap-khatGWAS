@@ -9,8 +9,24 @@ BIM_DIR="$HOME/neurogap_passed_all_qc"
 # Already has: N_case N_ctrl N
 # Standardize name/format only
 # -------------------------
-cp ku_se_meta.txt ku_gp08_meta_cleaned_with_N.txt
+awk '
+BEGIN { OFS="\t" }
 
+NR==1 {
+    print "MarkerName","CHR","BP","Allele1","Allele2","Freq1","FreqSE","MinFreq","MaxFreq","Effect","StdErr","P-value","Direction","N_case","N_ctrl","N"
+    next
+}
+
+{
+    neff = 4 / ((1/$14) + (1/$15))
+
+    for (i=1; i<=15; i++) {
+        printf "%s%s", $i, OFS
+    }
+
+    printf "%g\n", neff
+}
+' ku_se_meta.txt > ku_gp08_meta_cleaned_with_N.txt
 
 # -------------------------
 # 2) kuf_se_meta.txt
