@@ -1,0 +1,417 @@
+```{r}
+Author = 'Nico Matthew S. Valencia'
+Created= '02-23-2026'
+```
+
+```{r}
+# import libraries
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(purrr)
+library(scales)
+```
+
+```{r}
+# import files
+base <- "~/work/khat_gwas/phenotype_files/"
+
+files <- c(
+  AAU    = paste0(base, "AAU_khat_pheno.txt"),
+  Uganda = paste0(base, "Uganda_khat_pheno.txt"),
+  UCT    = paste0(base, "UCT_khat_pheno.txt"),
+  KEMRI  = paste0(base, "KEMRI_khat_pheno.txt"),
+  Moi    = paste0(base, "Moi_khat_pheno.txt")
+)
+
+df <- purrr::imap_dfr(
+  files,
+  ~ readr::read_table(.x, show_col_types = FALSE) %>%
+    dplyr::mutate(Site = .y)
+)
+```
+
+```{r}
+# Variables and their valid phenotype values
+phenotype_values <- list(
+  assist_khat     = 0:1,
+  assist_khat_amt = 0:5
+)
+
+for (site_name in names(files)) {
+  
+  cat("\n========================================\n")
+  cat("Site:", site_name, "\n")
+  cat("========================================\n")
+  
+  site_df <- df %>%
+    filter(Site == site_name)
+  
+
+  # KU: assist_khat
+
+  
+  ku_counts <- table(
+    factor(
+      site_df$assist_khat,
+      levels = phenotype_values$assist_khat
+    )
+  )
+  
+  ku_count_0 <- as.integer(ku_counts["0"])
+  ku_count_1 <- as.integer(ku_counts["1"])
+  ku_overall <- ku_count_0 + ku_count_1
+  
+  ku_pct_cases <- if (ku_overall > 0) {
+    100 * ku_count_1 / ku_overall
+  } else {
+    NA_real_
+  }
+  
+  cat("\nKhat Use (assist_khat)\n")
+  cat("Count 0:", ku_count_0, "\n")
+  cat("Count 1:", ku_count_1, "\n")
+  cat("Overall:", ku_overall, "\n")
+  cat(
+    "Percentage cases:",
+    sprintf("%.2f%%", ku_pct_cases),
+    "\n"
+  )
+  
+
+  # KUF: assist_khat_amt
+
+  
+  kuf_counts <- table(
+    factor(
+      site_df$assist_khat_amt,
+      levels = phenotype_values$assist_khat_amt
+    )
+  )
+  
+  kuf_overall <- sum(kuf_counts)
+  
+  cat("\nKhat Use Frequency (assist_khat_amt)\n")
+  
+  for (value in phenotype_values$assist_khat_amt) {
+    cat(
+      paste0("Count ", value, ":"),
+      as.integer(kuf_counts[as.character(value)]),
+      "\n"
+    )
+  }
+  
+  cat("Overall:", kuf_overall, "\n")
+}
+```
+```{r}
+# Overall KU counts and proportions across all sites
+ku_control_count <- sum(df$assist_khat == 0, na.rm = TRUE)
+ku_case_count    <- sum(df$assist_khat == 1, na.rm = TRUE)
+ku_overall_count <- ku_control_count + ku_case_count
+
+ku_summary <- data.frame(
+  Phenotype = c("Controls (0)", "Cases (1)", "Overall"),
+  Count = c(
+    ku_control_count,
+    ku_case_count,
+    ku_overall_count
+  ),
+  Proportion = c(
+    ku_control_count / ku_overall_count,
+    ku_case_count / ku_overall_count,
+    1
+  ),
+  Percentage = c(
+    100 * ku_control_count / ku_overall_count,
+    100 * ku_case_count / ku_overall_count,
+    100
+  )
+)
+
+print(ku_summary, row.names = FALSE)
+
+# Overall KUF count, excluding UCT
+kuf_overall_count <- df %>%
+  filter(Site != "UCT") %>%
+  summarise(
+    N = sum(assist_khat_amt %in% 0:5, na.rm = TRUE)
+  ) %>%
+  pull(N)
+
+cat(
+  "\nOverall KUF sample size excluding UCT:",
+  kuf_overall_count,
+  "\n"
+)
+```
+
+```{r}
+# assist_khat (Khat Use) distributions
+
+
+assist_khat_labels <- c(`0` = "Never Used", `1` = "Has Used")
+blue_life <- c("#c6dbef", "#08306b")  # light -> dark
+
+df_life <- df %>%
+  mutate(
+    assist_khat = factor(assist_khat, levels = c(0, 1), labels = assist_khat_labels)
+  ) %>%
+  count(Site, assist_khat) %>%
+  group_by(Site) %>%
+  mutate(
+    total = sum(n),
+    pct = n / total,
+    pct_lab = percent(pct, accuracy = 0.1)
+  ) %>%
+  ungroup()
+
+# Build a 2-row-per-site label dataframe with explicit y positions
+labels_life <- df_life %>%
+  dplyr::group_by(Site) %>%
+  dplyr::summarise(
+    total = dplyr::first(total),
+    has_n = n[assist_khat == "Has Used"],
+    never_n = n[assist_khat == "Never Used"],
+    has_lab = pct_lab[assist_khat == "Has Used"],
+    never_lab = pct_lab[assist_khat == "Never Used"],
+    .groups = "drop"
+  )
+
+labels_has <- labels_life %>%
+  transmute(
+    Site,
+    y = has_n,                 # top of Has Used segment (boundary)
+    label = has_lab,
+    vjust = -0.3                
+  )
+
+labels_never <- labels_life %>%
+  transmute(
+    Site,
+    y = total,                 # top of full stack
+    label = never_lab,
+    vjust = -0.3               
+  )
+
+labels_plot <- bind_rows(labels_has, labels_never)
+
+p1 <- ggplot(df_life, aes(x = Site, y = n, fill = assist_khat)) +
+  geom_col() +
+  geom_text(
+    data = labels_plot,
+    aes(x = Site, y = y, label = label, vjust = vjust),
+    inherit.aes = FALSE,
+    size = 4
+  ) +
+  scale_fill_manual(values = blue_life) +
+  labs(
+    title = "Distribution of Lifetime Khat Use",
+    x = "Site",
+    y = "Count",
+    fill = "Lifetime Usage"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  ) +
+  expand_limits(y = max(df_life$total) * 1.1)
+
+print(p1)
+```
+
+```{r}
+# assist_khat_amt (Khat Use Frequency) distribution
+
+assist_khat_amt_labels <- c(
+  `0` = "Never Used Lifetime",
+  `1` = "Have Not Used",
+  `2` = "Once or Twice",
+  `3` = "Monthly",
+  `4` = "Weekly",
+  `5` = "Daily or Almost Daily"
+)
+
+df_freq <- df %>%
+  mutate(assist_khat_amt = factor(
+    assist_khat_amt,
+    levels = 0:5,
+    labels = assist_khat_amt_labels
+  )) %>%
+  count(Site, assist_khat_amt)
+
+blue_freq <- c(
+  "#deebf7",
+  "#c6dbef",
+  "#9ecae1",
+  "#6baed6",
+  "#3182bd",
+  "#08519c"
+)
+
+p2 <- ggplot(df_freq,
+             aes(x = Site, y = n, fill = assist_khat_amt)) +
+  geom_col() +
+  scale_fill_manual(values = blue_freq) +
+  labs(
+    title = "Distribution of Khat Use Frequency",
+    x = "Site",
+    y = "Count",
+    fill = "Usage Past 3 Months"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+print(p2)
+```
+
+```{r}
+# reported sample size that went into GWAS
+
+null_model_dir <- "~/work/khat_gwas/debug/samples"
+
+null_files <- list.files(
+  path = null_model_dir,
+  pattern = "^gp08_.*_assist_khat_saige_null\\.rda$",
+  full.names = TRUE
+)
+
+if (length(null_files) == 0) {
+  stop(
+    "No assist_khat SAIGE null-model files found in: ",
+    null_model_dir
+  )
+}
+
+site_summary <- purrr::map_dfr(null_files, function(file) {
+  
+  # Load the .rda without placing its objects in the global environment
+  model_env <- new.env(parent = emptyenv())
+  loaded_objects <- load(file, envir = model_env)
+  
+  # Identify the loaded object containing the phenotype vector y
+  model_candidates <- loaded_objects[
+    vapply(
+      loaded_objects,
+      function(object_name) {
+        object <- model_env[[object_name]]
+        is.list(object) && "y" %in% names(object)
+      },
+      logical(1)
+    )
+  ]
+  
+  if (length(model_candidates) == 0) {
+    warning(
+      "No model object containing a top-level `y` field found in ",
+      basename(file)
+    )
+    
+    return(
+      tibble(
+        Site = sub(
+          "^gp08_(.*)_assist_khat_saige_null\\.rda$",
+          "\\1",
+          basename(file)
+        ),
+        Controls = NA_integer_,
+        Cases = NA_integer_,
+        Sample_size = NA_integer_
+      )
+    )
+  }
+  
+  model <- model_env[[model_candidates[1]]]
+  phenotype <- as.numeric(model$y)
+  
+  # Confirm that this is a binary 0/1 phenotype
+  unexpected_values <- setdiff(
+    unique(phenotype[!is.na(phenotype)]),
+    c(0, 1)
+  )
+  
+  if (length(unexpected_values) > 0) {
+    stop(
+      "Unexpected phenotype coding in ",
+      basename(file),
+      ": ",
+      paste(unexpected_values, collapse = ", "),
+      ". Expected 0 = control and 1 = case."
+    )
+  }
+  
+  controls <- sum(phenotype == 0, na.rm = TRUE)
+  cases    <- sum(phenotype == 1, na.rm = TRUE)
+  sample_size <- controls + cases
+  
+  tibble(
+    Site = sub(
+      "^gp08_(.*)_assist_khat_saige_null\\.rda$",
+      "\\1",
+      basename(file)
+    ),
+    Controls = controls,
+    Cases = cases,
+    Sample_size = sample_size
+  )
+})
+
+# Calculate proportions for each site
+site_summary <- site_summary %>%
+  mutate(
+    Control_proportion = Controls / Sample_size,
+    Case_proportion = Cases / Sample_size
+  )
+
+# Sum cases, controls, and sample sizes across all sites
+overall_summary <- site_summary %>%
+  summarise(
+    Site = "Overall",
+    Controls = sum(Controls, na.rm = TRUE),
+    Cases = sum(Cases, na.rm = TRUE),
+    Sample_size = sum(Sample_size, na.rm = TRUE)
+  ) %>%
+  mutate(
+    Control_proportion = Controls / Sample_size,
+    Case_proportion = Cases / Sample_size
+  )
+
+# Add the overall row to the site-level results
+null_model_summary <- bind_rows(
+  site_summary,
+  overall_summary
+) %>%
+  mutate(
+    `Control proportion` = scales::percent(
+      Control_proportion,
+      accuracy = 0.01
+    ),
+    `Case proportion` = scales::percent(
+      Case_proportion,
+      accuracy = 0.01
+    )
+  ) %>%
+  select(
+    Site,
+    Controls,
+    Cases,
+    `Sample size` = Sample_size,
+    `Control proportion`,
+    `Case proportion`
+  )
+
+# Render a viewable table in the knitted document
+knitr::kable(
+  null_model_summary,
+  caption = paste(
+    "Samples included in the assist_khat SAIGE null models.",
+    "The Overall row is calculated across all sites."
+  ),
+  align = c("l", "r", "r", "r", "r", "r")
+)
+```
+```

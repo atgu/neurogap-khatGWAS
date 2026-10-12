@@ -1,0 +1,21 @@
+SCHEME STDERR
+
+SEPARATOR TAB
+COLUMNCOUNTING LENIENT
+
+MARKER SNPID
+ALLELE A2 A1
+EFFECT beta
+STDERR SE
+PVALUE pval.spa
+WEIGHT N_SITE
+
+PROCESS A2_oriented_annotated_assoc_AAU_studysite_covar_all.tsv
+PROCESS A2_oriented_annotated_assoc_KEMRI_studysite_covar_all.tsv
+PROCESS A2_oriented_annotated_assoc_Moi_studysite_covar_all.tsv
+PROCESS A2_oriented_annotated_assoc_Uganda_studysite_covar_all.tsv
+
+OUTFILE kuf_se_meta .tbl
+
+ANALYZE
+QUIT

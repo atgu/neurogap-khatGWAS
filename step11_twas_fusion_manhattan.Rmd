@@ -1,0 +1,1213 @@
+---
+title: "FUSION Manhattan Plots"
+author: "Nico Valencia"
+date: "2026-04-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(data.table)
+library(tidyr)
+library(topr)
+library(qqman)
+library(tidyverse)
+library(stringr)
+library(purrr)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(ggrepel)
+
+
+```
+
+
+```{r}
+# Working directory
+setwd("/Users/nico/work/khat_gwas/fusion")
+
+# Base directory containing ku/ and kuf/
+base_dir <- "/Users/nico/work/khat_gwas/fusion"
+
+# Recursively find ALL .dat files
+fusion_files <- list.files(
+  path = base_dir,
+  pattern = "\\.dat$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+# Number of files found
+length(fusion_files)
+
+# Print all file paths
+fusion_files
+
+
+```
+
+```{r}
+# Calculate the local Bonferroni threshold for every FUSION file
+file_bonf <- lapply(fusion_files, function(f) {
+
+  df <- fread(f)
+
+  # Valid TWAS tests
+  n_tests <- sum(
+    !is.na(as.numeric(df$TWAS.P)) &
+    as.numeric(df$TWAS.P) > 0
+  )
+
+  # Local Bonferroni threshold
+  bonf_p <- 0.05 / n_tests
+
+  # Extract tissue name
+  tissue <- basename(f)
+  tissue <- gsub("^.*GTExv8\\.ALL\\.", "", tissue)
+  tissue <- gsub("\\.all_chr\\.dat$", "", tissue)
+
+  # Determine phenotype
+  phenotype <- ifelse(
+    grepl("/kuf/", f),
+    "KUF",
+    ifelse(grepl("/ku/", f), "KU", NA)
+  )
+
+  data.frame(
+    file = f,
+    phenotype = phenotype,
+    tissue = tissue,
+    n_tests = n_tests,
+    bonf_p = bonf_p
+  )
+}) %>%
+  bind_rows()
+
+# Display local Bonferroni thresholds
+file_bonf
+```
+
+```{r}
+write.csv(
+  file_bonf,
+  file = "local_bonferroni_thresholds.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# GTEx v8 uses GENCODE v26 on GRCh38
+gencode_file <- file.path(
+  base_dir,
+  "gencode.v26.annotation.gtf.gz"
+)
+
+# Download GENCODE v26 if it is not already present
+if (!file.exists(gencode_file)) {
+  download.file(
+    url = paste0(
+      "https://ftp.ebi.ac.uk/pub/databases/gencode/",
+      "Gencode_human/release_26/gencode.v26.annotation.gtf.gz"
+    ),
+    destfile = gencode_file,
+    mode = "wb"
+  )
+}
+
+# Read the GENCODE annotation
+gencode_v26 <- rtracklayer::import(gencode_file)
+
+# Create Ensembl ID-to-gene-symbol lookup table
+gene_lookup <- as.data.frame(gencode_v26) %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::transmute(
+    ENSEMBL = sub("\\..*$", "", as.character(gene_id)),
+    gene_symbol = as.character(gene_name)
+  ) %>%
+  dplyr::filter(
+    !is.na(ENSEMBL),
+    !is.na(gene_symbol),
+    gene_symbol != ""
+  ) %>%
+  dplyr::distinct(ENSEMBL, .keep_all = TRUE)
+```
+
+```{r}
+# KU FUSION Manhattan plots
+
+ku_files <- fusion_files[grepl("/ku/", fusion_files)]
+
+for (f in ku_files) {
+
+  df <- fread(f)
+
+plot_df <- df %>%
+  dplyr::transmute(
+    fusion_ID = as.character(ID),
+
+    # Remove the Ensembl version suffix, such as ".3"
+    ENSEMBL = sub("\\..*$", "", as.character(ID)),
+
+    CHR = as.integer(CHR),
+    BP = (as.numeric(P0) + as.numeric(P1)) / 2,
+    P = as.numeric(TWAS.P)
+  ) %>%
+  dplyr::filter(
+    !is.na(ENSEMBL),
+    !is.na(CHR),
+    !is.na(BP),
+    !is.na(P),
+    P > 0
+  )
+
+plot_df <- df %>%
+  dplyr::transmute(
+    fusion_ID = as.character(ID),
+    ENSEMBL = sub("\\..*$", "", as.character(ID)),
+    CHR = as.integer(CHR),
+    BP = (as.numeric(P0) + as.numeric(P1)) / 2,
+    P = as.numeric(TWAS.P)
+  ) %>%
+  dplyr::filter(
+    !is.na(ENSEMBL),
+    !is.na(CHR),
+    !is.na(BP),
+    !is.na(P),
+    P > 0
+  ) %>%
+  dplyr::left_join(
+    gene_lookup,
+    by = "ENSEMBL"
+  ) %>%
+  dplyr::mutate(
+    # qqman uses SNP as the annotation label
+    SNP = dplyr::if_else(
+      !is.na(gene_symbol) & gene_symbol != "",
+      gene_symbol,
+      fusion_ID
+    )
+  )
+  tissue <- basename(f)
+  tissue <- gsub("^.*GTExv8\\.ALL\\.", "", tissue)
+  tissue <- gsub("\\.all_chr\\.dat$", "", tissue)
+
+  local_bonf <- file_bonf %>%
+    dplyr::filter(file == f) %>%
+    dplyr::pull(bonf_p)
+
+  plot_title <- paste0(
+    "Khat Use x ",
+    tissue,
+    " | Bonf. P = ",
+    signif(local_bonf, 3)
+  )
+
+  manhattan(
+    plot_df,
+    main = plot_title,
+    cex.main = 1,
+    suggestiveline = FALSE,
+    genomewideline = FALSE,
+
+    # Annotate every gene passing the local threshold
+    annotatePval = local_bonf,
+    annotateTop = FALSE
+  )
+
+  abline(
+    h = -log10(local_bonf),
+    col = "red",
+    lty = 2,
+    lwd = 1.5
+  )
+}
+
+```
+```{r}
+# KU FUSION Manhattan plots
+
+kuf_files <- fusion_files[grepl("/kuf/", fusion_files)]
+
+for (f in kuf_files) {
+
+  df <- fread(f)
+
+plot_df <- df %>%
+  dplyr::transmute(
+    fusion_ID = as.character(ID),
+
+    # Remove the Ensembl version suffix, such as ".3"
+    ENSEMBL = sub("\\..*$", "", as.character(ID)),
+
+    CHR = as.integer(CHR),
+    BP = (as.numeric(P0) + as.numeric(P1)) / 2,
+    P = as.numeric(TWAS.P)
+  ) %>%
+  dplyr::filter(
+    !is.na(ENSEMBL),
+    !is.na(CHR),
+    !is.na(BP),
+    !is.na(P),
+    P > 0
+  )
+
+plot_df <- df %>%
+  dplyr::transmute(
+    fusion_ID = as.character(ID),
+    ENSEMBL = sub("\\..*$", "", as.character(ID)),
+    CHR = as.integer(CHR),
+    BP = (as.numeric(P0) + as.numeric(P1)) / 2,
+    P = as.numeric(TWAS.P)
+  ) %>%
+  dplyr::filter(
+    !is.na(ENSEMBL),
+    !is.na(CHR),
+    !is.na(BP),
+    !is.na(P),
+    P > 0
+  ) %>%
+  dplyr::left_join(
+    gene_lookup,
+    by = "ENSEMBL"
+  ) %>%
+  dplyr::mutate(
+    # qqman uses SNP as the annotation label
+    SNP = dplyr::if_else(
+      !is.na(gene_symbol) & gene_symbol != "",
+      gene_symbol,
+      fusion_ID
+    )
+  )
+  tissue <- basename(f)
+  tissue <- gsub("^.*GTExv8\\.ALL\\.", "", tissue)
+  tissue <- gsub("\\.all_chr\\.dat$", "", tissue)
+
+  local_bonf <- file_bonf %>%
+    dplyr::filter(file == f) %>%
+    dplyr::pull(bonf_p)
+
+  plot_title <- paste0(
+    "Khat Use Frequency x ",
+    tissue,
+    " | Bonf. P = ",
+    signif(local_bonf, 3)
+  )
+
+  manhattan(
+    plot_df,
+    main = plot_title,
+    cex.main = 1,
+    suggestiveline = FALSE,
+    genomewideline = FALSE,
+
+    # Annotate every gene passing the local threshold
+    annotatePval = local_bonf,
+    annotateTop = FALSE
+  )
+
+  abline(
+    h = -log10(local_bonf),
+    col = "red",
+    lty = 2,
+    lwd = 1.5
+  )
+}
+```
+
+
+
+
+
+```{r}
+
+read_fusion_set <- function(files, phenotype_label) {
+
+  data.table::rbindlist(
+    lapply(files, function(f) {
+
+      df <- data.table::fread(f)
+
+      # Extract tissue
+      tissue <- basename(f)
+      tissue <- gsub("^.*GTExv8\\.ALL\\.", "", tissue)
+      tissue <- gsub("\\.all_chr\\.dat$", "", tissue)
+
+      # Get local Bonferroni information
+      bonf_info <- file_bonf %>%
+        dplyr::filter(file == f)
+
+      local_bonf <- bonf_info$bonf_p
+      n_tests <- bonf_info$n_tests
+
+      df %>%
+        dplyr::mutate(
+          phenotype = phenotype_label,
+          tissue = tissue,
+
+          # File information
+          file = f,
+          n_tests = n_tests,
+          local_bonf = local_bonf,
+
+          # Convert values to numeric
+          TWAS.P = as.numeric(TWAS.P),
+          TWAS.Z = as.numeric(TWAS.Z),
+
+          COLOC.PP0 = as.numeric(COLOC.PP0),
+          COLOC.PP1 = as.numeric(COLOC.PP1),
+          COLOC.PP2 = as.numeric(COLOC.PP2),
+          COLOC.PP3 = as.numeric(COLOC.PP3),
+          COLOC.PP4 = as.numeric(COLOC.PP4),
+
+          # logP
+          logP = -log10(TWAS.P)
+        )
+    }),
+    fill = TRUE
+  )
+}
+```
+
+```{r}
+
+# Create KU and KUF coloc files
+ku_files <- fusion_files[grepl("/ku/", fusion_files)]
+kuf_files <- fusion_files[grepl("/kuf/", fusion_files)]
+
+ku_all <- read_fusion_set(
+  ku_files,
+  "KU"
+)
+
+kuf_all <- read_fusion_set(
+  kuf_files,
+  "KUF"
+)
+```
+
+```{r}
+
+# remove invalid twas p-values
+ku_noNA <- ku_all %>%
+  dplyr::filter(
+    !is.na(TWAS.P),
+    TWAS.P > 0,
+    !is.na(logP)
+  )
+
+kuf_noNA <- kuf_all %>%
+  dplyr::filter(
+    !is.na(TWAS.P),
+    TWAS.P > 0,
+    !is.na(logP)
+  )
+```
+
+```{r}
+# get the global bonferroni threshold for both KU and KUF
+ku_global_bonf <- 0.05 / nrow(ku_noNA)
+kuf_global_bonf <- 0.05 / nrow(kuf_noNA)
+
+
+```
+
+```{r}
+# Prepare KU volcano data with gene symbols and labels
+ku_volcano <- ku_noNA %>%
+  dplyr::mutate(
+    ENSEMBL = sub("\\..*$", "", as.character(ID))
+  ) %>%
+  dplyr::left_join(
+    gene_lookup,
+    by = "ENSEMBL"
+  ) %>%
+  dplyr::mutate(
+    # Fall back to the original Ensembl ID if no symbol is available
+    plot_gene = dplyr::if_else(
+      !is.na(gene_symbol) & gene_symbol != "",
+      gene_symbol,
+      as.character(ID)
+    ),
+
+    # Example: Testis:chr1:NOC2L
+    plot_label = paste0(
+      tissue,
+      ":chr",
+      CHR,
+      ":",
+      plot_gene
+    )
+  )
+```
+
+```{r}
+# KU coloc volcano plot
+ggplot(
+  ku_volcano,
+  aes(
+    x = TWAS.Z,
+    y = logP,
+    color = COLOC.PP4
+  )
+) +
+
+  geom_point(
+    alpha = 0.6,
+    size = 1
+  ) +
+
+  # Global Bonferroni threshold
+  geom_hline(
+    yintercept = -log10(ku_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally significant genes
+  ggrepel::geom_text_repel(
+    data = ku_volcano %>%
+      dplyr::filter(
+        TWAS.P < ku_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    na.value = "gray75",
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use: Volcano Plot for All TWAS Results",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(ku_global_bonf, 3),
+      " | N = ",
+      nrow(ku_noNA),
+      " tests"
+    ),
+    x = "TWAS Z-score",
+    y = expression(-log[10](TWAS.P)),
+    color = "COLOC PP4"
+  )
+```
+
+
+```{r}
+# Prepare KUF volcano data with gene symbols and labels
+kuf_volcano <- kuf_noNA %>%
+  dplyr::mutate(
+    ENSEMBL = sub("\\..*$", "", as.character(ID))
+  ) %>%
+  dplyr::left_join(
+    gene_lookup,
+    by = "ENSEMBL"
+  ) %>%
+  dplyr::mutate(
+    # Fall back to the original Ensembl ID if no symbol is available
+    plot_gene = dplyr::if_else(
+      !is.na(gene_symbol) & gene_symbol != "",
+      gene_symbol,
+      as.character(ID)
+    ),
+
+    # Example: Testis:chr1:NOC2L
+    plot_label = paste0(
+      tissue,
+      ":chr",
+      CHR,
+      ":",
+      plot_gene
+    )
+  )
+```
+
+```{r}
+# KUF coloc volcano plot
+ggplot(
+  kuf_volcano,
+  aes(
+    x = TWAS.Z,
+    y = logP,
+    color = COLOC.PP4
+  )
+) +
+
+  geom_point(
+    alpha = 0.6,
+    size = 1
+  ) +
+
+  # Global Bonferroni threshold
+  geom_hline(
+    yintercept = -log10(kuf_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally significant genes
+  ggrepel::geom_text_repel(
+    data = kuf_volcano %>%
+      dplyr::filter(
+        TWAS.P < kuf_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    na.value = "gray75",
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use Frequency: Volcano Plot for All TWAS Results",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(kuf_global_bonf, 3),
+      " | N = ",
+      nrow(ku_noNA),
+      " tests"
+    ),
+    x = "TWAS Z-score",
+    y = expression(-log[10](TWAS.P)),
+    color = "COLOC PP4"
+  )
+```
+
+
+
+
+```{r}
+# KUF coloc density plots
+kuf_pp_long <- kuf_all %>%
+  dplyr::select(
+    phenotype,
+    tissue,
+    ID,
+    COLOC.PP0,
+    COLOC.PP1,
+    COLOC.PP2,
+    COLOC.PP3,
+    COLOC.PP4
+  ) %>%
+  pivot_longer(
+    cols = starts_with("COLOC.PP"),
+    names_to = "PP_type",
+    values_to = "PP"
+  ) %>%
+  dplyr::filter(!is.na(PP))
+
+ggplot(
+  kuf_pp_long,
+  aes(x = PP)
+) +
+
+  geom_density(
+    fill = "darkorange",
+    alpha = 0.5,
+    linewidth = 0.6
+  ) +
+
+  facet_wrap(
+    ~ PP_type,
+    nrow = 1,
+    scales = "free_y"
+  ) +
+
+  theme_bw() +
+
+  theme(
+    strip.text = element_text(size = 9),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10),
+    plot.title = element_text(size = 12)
+  ) +
+
+  labs(
+    title = "KUF: COLOC Posterior Probability Densities",
+    x = "Posterior Probability",
+    y = "Density"
+  )
+```
+
+```{r}
+# KU Distributions of pvalue X coloc[1:4]
+# COLOC.PP1
+p1 <- ggplot(
+  ku_volcano %>%
+    dplyr::filter(!is.na(COLOC.PP1)),
+  aes(
+    x = logP,
+    y = COLOC.PP1
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP1),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  # Global Bonferroni threshold
+  geom_vline(
+    xintercept = -log10(ku_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Colocalization threshold
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally Bonferroni-significant genes
+  ggrepel::geom_text_repel(
+    data = ku_volcano %>%
+      dplyr::filter(
+        !is.na(COLOC.PP1),
+        TWAS.P < ku_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use: TWAS Significance vs COLOC.PP1",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(ku_global_bonf, 3)
+    ),
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC.PP1",
+    color = "PP1"
+  )
+
+
+# COLOC.PP2
+p2 <- ggplot(
+  ku_volcano %>%
+    dplyr::filter(!is.na(COLOC.PP2)),
+  aes(
+    x = logP,
+    y = COLOC.PP2
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP2),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  # Global Bonferroni threshold
+  geom_vline(
+    xintercept = -log10(ku_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Colocalization threshold
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally Bonferroni-significant genes
+  ggrepel::geom_text_repel(
+    data = ku_volcano %>%
+      dplyr::filter(
+        !is.na(COLOC.PP2),
+        TWAS.P < ku_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use: TWAS Significance vs COLOC.PP2",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(ku_global_bonf, 3)
+    ),
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC.PP2",
+    color = "PP2"
+  )
+
+
+# COLOC.PP3
+p3 <- ggplot(
+  ku_volcano %>%
+    dplyr::filter(!is.na(COLOC.PP3)),
+  aes(
+    x = logP,
+    y = COLOC.PP3
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP3),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  # Global Bonferroni threshold
+  geom_vline(
+    xintercept = -log10(ku_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Colocalization threshold
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally Bonferroni-significant genes
+  ggrepel::geom_text_repel(
+    data = ku_volcano %>%
+      dplyr::filter(
+        !is.na(COLOC.PP3),
+        TWAS.P < ku_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use: TWAS Significance vs COLOC.PP3",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(ku_global_bonf, 3)
+    ),
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC.PP3",
+    color = "PP3"
+  )
+
+
+# COLOC.PP4
+p4 <- ggplot(
+  ku_volcano %>%
+    dplyr::filter(!is.na(COLOC.PP4)),
+  aes(
+    x = logP,
+    y = COLOC.PP4
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP4),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  # Global Bonferroni threshold
+  geom_vline(
+    xintercept = -log10(ku_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Colocalization threshold
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally Bonferroni-significant genes
+  ggrepel::geom_text_repel(
+    data = ku_volcano %>%
+      dplyr::filter(
+        !is.na(COLOC.PP4),
+        TWAS.P < ku_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use: TWAS Significance vs COLOC.PP4",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(ku_global_bonf, 3)
+    ),
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC.PP4",
+    color = "PP4"
+  )
+
+
+# Display each plot separately
+print(p1)
+print(p2)
+print(p3)
+print(p4)
+```
+
+```{r}
+# KUF distribution of COLOC values
+# COLOC.PP1
+p1 <- ggplot(
+  kuf_volcano %>%
+    dplyr::filter(!is.na(COLOC.PP1)),
+  aes(
+    x = logP,
+    y = COLOC.PP1
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP1),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  # Global Bonferroni threshold
+  geom_vline(
+    xintercept = -log10(kuf_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Colocalization threshold
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally Bonferroni-significant genes
+  ggrepel::geom_text_repel(
+    data = ku_volcano %>%
+      dplyr::filter(
+        !is.na(COLOC.PP1),
+        TWAS.P < ku_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use: TWAS Significance vs COLOC.PP1",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(ku_global_bonf, 3)
+    ),
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC.PP1",
+    color = "PP1"
+  )
+
+
+# COLOC.PP2
+p2 <- ggplot(
+  ku_volcano %>%
+    dplyr::filter(!is.na(COLOC.PP2)),
+  aes(
+    x = logP,
+    y = COLOC.PP2
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP2),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  # Global Bonferroni threshold
+  geom_vline(
+    xintercept = -log10(ku_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Colocalization threshold
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally Bonferroni-significant genes
+  ggrepel::geom_text_repel(
+    data = kuf_volcano %>%
+      dplyr::filter(
+        !is.na(COLOC.PP2),
+        TWAS.P < ku_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use: TWAS Significance vs COLOC.PP2",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(ku_global_bonf, 3)
+    ),
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC.PP2",
+    color = "PP2"
+  )
+
+
+# COLOC.PP3
+p3 <- ggplot(
+  kuf_volcano %>%
+    dplyr::filter(!is.na(COLOC.PP3)),
+  aes(
+    x = logP,
+    y = COLOC.PP3
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP3),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  # Global Bonferroni threshold
+  geom_vline(
+    xintercept = -log10(ku_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Colocalization threshold
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally Bonferroni-significant genes
+  ggrepel::geom_text_repel(
+    data = kuf_volcano %>%
+      dplyr::filter(
+        !is.na(COLOC.PP3),
+        TWAS.P < ku_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use: TWAS Significance vs COLOC.PP3",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(ku_global_bonf, 3)
+    ),
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC.PP3",
+    color = "PP3"
+  )
+
+
+# COLOC.PP4
+p4 <- ggplot(
+  kuf_volcano %>%
+    dplyr::filter(!is.na(COLOC.PP4)),
+  aes(
+    x = logP,
+    y = COLOC.PP4
+  )
+) +
+
+  geom_point(
+    aes(color = COLOC.PP4),
+    alpha = 0.7,
+    size = 1.5
+  ) +
+
+  # Global Bonferroni threshold
+  geom_vline(
+    xintercept = -log10(ku_global_bonf),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7
+  ) +
+
+  # Colocalization threshold
+  geom_hline(
+    yintercept = 0.8,
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.7
+  ) +
+
+  # Annotate only globally Bonferroni-significant genes
+  ggrepel::geom_text_repel(
+    data = kuf_volcano %>%
+      dplyr::filter(
+        !is.na(COLOC.PP4),
+        TWAS.P < ku_global_bonf
+      ),
+    aes(label = plot_label),
+    color = "black",
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+
+  scale_color_viridis_c(
+    option = "viridis"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    title = "Khat Use Frequency: TWAS Significance vs COLOC.PP4",
+    subtitle = paste0(
+      "Global Bonferroni P = ",
+      signif(ku_global_bonf, 3)
+    ),
+    x = expression(-log[10](TWAS.P)),
+    y = "COLOC.PP4",
+    color = "PP4"
+  )
+
+
+# Display each plot separately
+print(p1)
+print(p2)
+print(p3)
+print(p4)
+```
+
+```{r}
+write.csv(
+  fusion_comparison_table,
+  "/Users/nico/work/khat_gwas/fusion/KU_KUF_local_significant_TWAS_table.csv",
+  row.names = FALSE
+)
+```
+

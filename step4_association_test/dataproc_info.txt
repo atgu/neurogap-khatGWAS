@@ -1,0 +1,22 @@
+# Should take about half a day for everything to run if you use the pre-MAF filtered files
+
+# start dataproc cluster
+hailctl dataproc start nv-polmm-kuf \
+  --master-machine-type n1-highmem-16 \
+  --worker-machine-type n1-highmem-16 \
+  --master-boot-disk-size 450 \
+  --num-workers 0 \
+  --max-idle=48h \
+  --requester-pays-allow-all \
+  --big-executors \
+  --no-off-heap-memory \
+  --region us-central1 \
+  --network broad-allow
+
+# connect to dataproc cluster
+hailctl dataproc connect nv-polmm-kuf notebook --zone=us-central1-b
+
+
+# stop dataproc when done
+hailctl dataproc stop nv-polmm-kuf \
+  --region us-central1

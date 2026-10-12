@@ -1,1 +1,0 @@
-# neurogap_khat_gwas

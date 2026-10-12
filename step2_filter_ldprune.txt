@@ -1,0 +1,68 @@
+# NGP5434-1XJK isn't present in the metadata and doesn't have a duplicate so it will be excluded from subsequent analysis
+
+echo -e "UCT\tNGP54341XJK" > remove.txt
+
+/home/tboltz/apps/plink2 \
+    --bfile gp08_UCT_pre_ldprune \
+    --remove remove.txt \
+    --make-bed \
+    --out gp08_UCT_pre_ldprune
+
+/home/tboltz/apps/plink2 \
+    --bfile UCT_passed_all_qc \
+    --remove remove.txt \
+    --make-bed \
+    --out UCT_passed_all_qc
+
+# applying MAC here
+# MAC is optional as we later apply MAF filters which move our MAC and more
+
+for prefix in AAU_passed_all_qc KEMRI_passed_all_qc Moi_passed_all_qc UCT_passed_all_qc Uganda_passed_all_qc
+do
+    site=$(echo $prefix | sed 's/_passed_all_qc//')
+
+    /home/tboltz/apps/plink2 \
+        --bfile $prefix \
+        --mac 20 \
+        --maf 0.05 \
+        --make-bed \
+        --out pre_ldprune/gp08_${site}_pre_ldprune
+done
+
+# will remove SNPs with MAF of 0.05, and samples of missingness 0.01, and the sample above
+
+sites="gp08_AAU_pre_ldprune gp08_KEMRI_pre_ldprune gp08_Moi_pre_ldprune gp08_UCT_pre_ldprune gp08_Uganda_pre_ldprune"
+
+# remove duplicate variants
+for p in $sites; do
+  # Write IDs for all *but the first* occurrence of each ID
+  awk 'seen[$2]++{print $2}' ${p}.bim > tmp_ids/${p}.dup_after_first.ids
+  echo -n "$p: "
+  wc -l tmp_ids/${p}.dup_after_first.ids
+done
+
+for p in $sites; do
+  /home/tboltz/apps/plink2 \
+    --bfile "$p" \
+    --exclude tmp_ids/${p}.dup_after_first.ids \
+    --make-bed \
+    --out tmp_ids/${p}_nodupid
+done
+
+# get ldprune list
+for p in $sites; do
+  /home/tboltz/apps/plink2 \
+    --bfile tmp_ids/${p}_nodupid \
+    --indep-pairwise 10000 100 0.1 \
+    --out post_ldprune/${p}
+done
+
+# extract pruned snps
+for p in $sites; do
+  /home/tboltz/apps/plink2 \
+    --bfile tmp_ids/${p}_nodupid \
+    --extract post_ldprune/${p}.prune.in \
+    --make-bed \
+    --out post_ldprune/${p}_ldpruned
+done
+

@@ -1,0 +1,7143 @@
+---
+title: "stepX_beta_comparisons"
+author: "Nico Matthew S. Valencia"
+output: html_document
+---
+
+You can refer here to how my files looked when I sent it to google cloud:
+gs://neurogap-bge-imputed-regional/nico/sud-gwas/rsid_match
+If you just download like from "gsutil cp gs://neurogap-bge-imputed-regional/nico/sud-gwas/rsid_match"
+you'll have the same structure
+
+
+### Manipulating data and plotting positive betas only
+  # i.e., if beta ku/kuf = neg. value, multiply beta ku/kuf and beta other sumstat by -1
+
+```{r}
+
+#install.packages("ggplot2")
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggrepel)
+library(deming)
+
+
+# Fit generalized Deming regression using the standard errors
+# of both beta estimates. This accounts for uncertainty on both axes.
+get_deming_results <- function(
+  plot_dat,
+  x_beta,
+  y_beta,
+  x_se,
+  y_se
+) {
+
+  deming_dat <- data.frame(
+    x = as.numeric(plot_dat[[x_beta]]),
+    y = as.numeric(plot_dat[[y_beta]]),
+    x_se = as.numeric(plot_dat[[x_se]]),
+    y_se = as.numeric(plot_dat[[y_se]])
+  )
+
+  deming_dat <- deming_dat[
+    complete.cases(deming_dat) &
+      is.finite(deming_dat$x) &
+      is.finite(deming_dat$y) &
+      is.finite(deming_dat$x_se) &
+      is.finite(deming_dat$y_se) &
+      deming_dat$x_se > 0 &
+      deming_dat$y_se > 0,
+    ,
+    drop = FALSE
+  ]
+
+  if (
+    nrow(deming_dat) < 3 ||
+      length(unique(deming_dat$x)) < 2 ||
+      length(unique(deming_dat$y)) < 2
+  ) {
+
+    return(
+      list(
+        intercept = NA_real_,
+        slope = NA_real_,
+        slope_se = NA_real_,
+        slope_p = NA_real_,
+        label = "Deming regression not calculated"
+      )
+    )
+  }
+
+  deming_fit <- tryCatch(
+    deming::deming(
+      y ~ x,
+      data = deming_dat,
+      xstd = x_se,
+      ystd = y_se,
+      jackknife = TRUE
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(deming_fit)) {
+
+    return(
+      list(
+        intercept = NA_real_,
+        slope = NA_real_,
+        slope_se = NA_real_,
+        slope_p = NA_real_,
+        label = "Deming regression not calculated"
+      )
+    )
+  }
+
+  deming_coef <- coef(deming_fit)
+
+  if (
+    length(deming_coef) < 2 ||
+      !all(is.finite(deming_coef[1:2]))
+  ) {
+
+    return(
+      list(
+        intercept = NA_real_,
+        slope = NA_real_,
+        slope_se = NA_real_,
+        slope_p = NA_real_,
+        label = "Deming regression not calculated"
+      )
+    )
+  }
+
+  deming_intercept <- unname(deming_coef[1])
+  deming_slope <- unname(deming_coef[2])
+
+  # deming$variance is the jackknife variance-covariance matrix.
+  # The p-value below tests H0: Deming slope = 0 using a two-sided
+  # normal approximation.
+  deming_slope_se <- tryCatch(
+    sqrt(deming_fit$variance[2, 2]),
+    error = function(e) NA_real_
+  )
+
+  deming_slope_p <- if (
+    is.finite(deming_slope_se) && deming_slope_se > 0
+  ) {
+    2 * pnorm(
+      abs(deming_slope / deming_slope_se),
+      lower.tail = FALSE
+    )
+  } else {
+    NA_real_
+  }
+
+  deming_p_label <- if (is.finite(deming_slope_p)) {
+    paste0(
+      " | Deming p = ",
+      format.pval(
+        deming_slope_p,
+        digits = 3,
+        eps = 1e-300
+      )
+    )
+  } else {
+    " | Deming p not calculated"
+  }
+
+  list(
+    intercept = deming_intercept,
+    slope = deming_slope,
+    slope_se = deming_slope_se,
+    slope_p = deming_slope_p,
+    label = paste0(
+      "Deming slope = ",
+      formatC(
+        deming_slope,
+        format = "f",
+        digits = 4
+      ),
+      deming_p_label
+    )
+  )
+}
+
+# Store one summary-table row for each plotted comparison
+comparison_summary <- data.frame(
+  `Khat Use or Khat Use Frequency` = character(),
+  `Summary Statistic of Comparison` = character(),
+  `Pearson Correlation` = numeric(),
+  `Pearson Pvalue` = numeric(),
+  `Deming Slope` = numeric(),
+  `Deming Pvalue` = numeric(),
+  `Number of Variants in Comparison` = integer(),
+  `Number of Vars from Khat Use or Khat Use Frequency with pvalue < 0.05` = integer(),
+  check.names = FALSE
+)
+
+add_comparison_summary <- function(
+  plot_dat,
+  x_beta,
+  y_beta,
+  x_p,
+  khat_trait,
+  comparison_label,
+  deming_results
+) {
+
+  pearson_r_table <- NA_real_
+  pearson_p_table <- NA_real_
+
+  if (
+    nrow(plot_dat) >= 3 &&
+      length(unique(plot_dat[[x_beta]])) >= 2 &&
+      length(unique(plot_dat[[y_beta]])) >= 2
+  ) {
+
+    pearson_test_table <- tryCatch(
+      cor.test(
+        plot_dat[[x_beta]],
+        plot_dat[[y_beta]],
+        method = "pearson"
+      ),
+      error = function(e) NULL
+    )
+
+    if (!is.null(pearson_test_table)) {
+      pearson_r_table <- unname(pearson_test_table$estimate)
+      pearson_p_table <- pearson_test_table$p.value
+    }
+  }
+
+  khat_p05_table <- sum(
+    !is.na(plot_dat[[x_p]]) &
+      is.finite(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < 0.05
+  )
+
+  new_row <- data.frame(
+    `Khat Use or Khat Use Frequency` = khat_trait,
+    `Summary Statistic of Comparison` = comparison_label,
+    `Pearson Correlation` = pearson_r_table,
+    `Pearson Pvalue` = pearson_p_table,
+    `Deming Slope` = deming_results$slope,
+    `Deming Pvalue` = deming_results$slope_p,
+    `Number of Variants in Comparison` = nrow(plot_dat),
+    `Number of Vars from Khat Use or Khat Use Frequency with pvalue < 0.05` = khat_p05_table,
+    check.names = FALSE
+  )
+
+  comparison_summary <<- dplyr::bind_rows(
+    comparison_summary,
+    new_row
+  )
+}
+
+```
+
+
+```{r}
+# Hatoum: list all harmonized pairwise files
+data_dir <- "/Users/nico/work/sud/hatoum_lifted_harmonized"
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_Hatoum2023AddictionEuropean_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+files
+
+ku_sug_thresh <- 1e-5
+
+# List of lead vars for Hatoum
+# Lead variants for Hatoum: Addiction
+
+# clump lead p<5*10e-8
+hatoum_lead <- c(
+  "rs1937455", "rs1475064", "rs2860846", "rs1260326", "rs570436", "rs2717054", "rs55855024", "rs6795772",
+  "rs3114045", "rs1662031", "rs1813006", "rs864882", "rs7073987", "rs2861190", "rs17602038", "rs6589386", 
+  "rs10083370","rs28567725", "rs2424952"
+)
+```
+
+```{r}
+# Hatoum: Store the lead-variant datasets here
+hatoum_lead_data <- list()
+
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+
+  # Identify required columns
+  x_beta <- grep(
+    "^beta_ku$|^beta_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+  y_beta <- grep(
+    "^beta_Hatoum2023AddictionEuropean.*_to_khat_A1$",
+    names(dat),
+    value = TRUE
+  )
+
+  x_p <- grep(
+    "^p_ku$|^p_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+  y_p <- "P"
+
+
+  cat("x_beta:", x_beta, "\n")
+  cat("y_beta:", y_beta, "\n")
+  cat("x_p:", x_p, "\n")
+  cat("y_p:", y_p, "\n")
+
+
+  if (
+    length(x_beta) != 1 ||
+      length(y_beta) != 1 ||
+      length(x_p) != 1 ||
+      !(y_p %in% names(dat)) ||
+      !("khat_marker" %in% names(dat))
+  ) {
+
+    cat(
+      "Skipping because required columns were not found.\n"
+    )
+
+    print(names(dat))
+    next
+  }
+
+
+  # Identify separate Hatoum marker column
+  marker_candidates <- grep(
+    "marker$|^SNP$|^rsid$|^RSID$",
+    names(dat),
+    value = TRUE,
+    ignore.case = TRUE
+  )
+
+  marker_candidates <- setdiff(
+    marker_candidates,
+    "khat_marker"
+  )
+
+  if (length(marker_candidates) > 0) {
+
+    hatoum_marker <- marker_candidates[1]
+
+    cat(
+      "Hatoum marker column:",
+      hatoum_marker,
+      "\n"
+    )
+
+  } else {
+
+    hatoum_marker <- NULL
+
+    cat(
+      "No separate Hatoum marker column detected; ",
+      "using khat_marker only.\n",
+      sep = ""
+    )
+  }
+
+
+  # Retain only requested Hatoum lead variants
+  if (!is.null(hatoum_marker)) {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% hatoum_lead |
+        dat[[hatoum_marker]] %in% hatoum_lead,
+      ,
+      drop = FALSE
+    ]
+
+  } else {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% hatoum_lead,
+      ,
+      drop = FALSE
+    ]
+  }
+
+
+  cat(
+    "Lead SNP rows found:",
+    nrow(dat_lead),
+    "\n"
+  )
+
+
+  if (nrow(dat_lead) == 0) {
+
+    cat(
+      "No Hatoum lead variants found; skipping.\n"
+    )
+
+    next
+  }
+
+
+  # Convert beta and p-value columns to numeric
+  dat_lead[[x_beta]] <- as.numeric(
+    dat_lead[[x_beta]]
+  )
+
+  dat_lead[[y_beta]] <- as.numeric(
+    dat_lead[[y_beta]]
+  )
+
+  dat_lead[[x_p]] <- as.numeric(
+    dat_lead[[x_p]]
+  )
+
+  dat_lead[[y_p]] <- as.numeric(
+    dat_lead[[y_p]]
+  )
+
+
+  # Reconstruct signed Z-scores from two-sided p-values
+  #
+  # Z = sign(beta) * |qnorm(p / 2)|
+  dat_lead$z_khat <- ifelse(
+    !is.na(dat_lead[[x_beta]]) &
+      !is.na(dat_lead[[x_p]]) &
+      dat_lead[[x_p]] > 0 &
+      dat_lead[[x_p]] < 1 &
+      dat_lead[[x_beta]] != 0,
+
+    sign(dat_lead[[x_beta]]) *
+      abs(qnorm(dat_lead[[x_p]] / 2)),
+
+    NA_real_
+  )
+
+  dat_lead$z_hatoum <- ifelse(
+    !is.na(dat_lead[[y_beta]]) &
+      !is.na(dat_lead[[y_p]]) &
+      dat_lead[[y_p]] > 0 &
+      dat_lead[[y_p]] < 1 &
+      dat_lead[[y_beta]] != 0,
+
+    sign(dat_lead[[y_beta]]) *
+      abs(qnorm(dat_lead[[y_p]] / 2)),
+
+    NA_real_
+  )
+
+
+  # Reconstruct standard errors
+  #
+  # SE = beta / Z
+  dat_lead$se_khat <- ifelse(
+    !is.na(dat_lead$z_khat) &
+      dat_lead$z_khat != 0,
+
+    dat_lead[[x_beta]] /
+      dat_lead$z_khat,
+
+    NA_real_
+  )
+
+  dat_lead$se_hatoum <- ifelse(
+    !is.na(dat_lead$z_hatoum) &
+      dat_lead$z_hatoum != 0,
+
+    dat_lead[[y_beta]] /
+      dat_lead$z_hatoum,
+
+    NA_real_
+  )
+
+
+  # Store column names for the plotting cell
+  attr(dat_lead, "x_beta") <- x_beta
+  attr(dat_lead, "y_beta") <- y_beta
+  attr(dat_lead, "x_p") <- x_p
+  attr(dat_lead, "y_p") <- y_p
+  attr(dat_lead, "hatoum_marker") <- hatoum_marker
+
+
+  # Name each list element using the input filename
+  pair_name <- tools::file_path_sans_ext(
+    basename(file)
+  )
+
+  hatoum_lead_data[[pair_name]] <- dat_lead
+
+
+  cat(
+    "Rows with reconstructed KU/KUF SE:",
+    sum(!is.na(dat_lead$se_khat)),
+    "\n"
+  )
+
+  cat(
+    "Rows with reconstructed Hatoum SE:",
+    sum(!is.na(dat_lead$se_hatoum)),
+    "\n"
+  )
+}
+
+
+# Inspect the resulting list
+names(hatoum_lead_data)
+
+lapply(
+  hatoum_lead_data,
+  function(x) {
+    x[
+      ,
+      c(
+        "khat_marker",
+        attr(x, "x_beta"),
+        attr(x, "x_p"),
+        "z_khat",
+        "se_khat",
+        attr(x, "y_beta"),
+        attr(x, "y_p"),
+        "z_hatoum",
+        "se_hatoum"
+      )
+    ]
+  }
+)
+```
+
+```{r}
+# Hatoum: positive KU/KUF beta graphing
+
+for (pair_name in names(hatoum_lead_data)) {
+
+  cat("\nPlotting:", pair_name, "\n")
+
+  plot_dat <- hatoum_lead_data[[pair_name]]
+
+
+  # Retrieve column names stored in Cell 1
+  x_beta <- attr(plot_dat, "x_beta")
+  y_beta <- attr(plot_dat, "y_beta")
+  x_p <- attr(plot_dat, "x_p")
+  hatoum_marker <- attr(
+    plot_dat,
+    "hatoum_marker"
+  )
+
+
+  # Remove rows missing either beta or either SE
+  plot_dat <- plot_dat[
+    !is.na(plot_dat[[x_beta]]) &
+      !is.na(plot_dat[[y_beta]]) &
+      !is.na(plot_dat$se_khat) &
+      !is.na(plot_dat$se_hatoum) &
+      is.finite(plot_dat$se_khat) &
+      is.finite(plot_dat$se_hatoum) &
+      plot_dat$se_khat >= 0 &
+      plot_dat$se_hatoum >= 0,
+    ,
+    drop = FALSE
+  ]
+
+
+  if (nrow(plot_dat) == 0) {
+
+    cat(
+      "Skipping because no rows have complete beta and SE values.\n"
+    )
+
+    next
+  }
+
+
+  # Orient the KU/KUF beta positively
+  #
+  # Flip both aligned betas together.
+  # Standard errors remain unchanged.
+  flip_rows <- plot_dat[[x_beta]] < 0
+
+  cat(
+    "Lead SNP rows flipped:",
+    sum(flip_rows),
+    "\n"
+  )
+
+  plot_dat[[x_beta]][flip_rows] <-
+    -plot_dat[[x_beta]][flip_rows]
+
+  plot_dat[[y_beta]][flip_rows] <-
+    -plot_dat[[y_beta]][flip_rows]
+
+
+  # Calculate 95% confidence intervals
+  plot_dat$x_ci_lower <-
+    plot_dat[[x_beta]] -
+    1.96 * plot_dat$se_khat
+
+  plot_dat$x_ci_upper <-
+    plot_dat[[x_beta]] +
+    1.96 * plot_dat$se_khat
+
+  plot_dat$y_ci_lower <-
+    plot_dat[[y_beta]] -
+    1.96 * plot_dat$se_hatoum
+
+  plot_dat$y_ci_upper <-
+    plot_dat[[y_beta]] +
+    1.96 * plot_dat$se_hatoum
+
+
+  # Highlight when KU/KUF p < 1e-5
+  plot_dat$highlight <-
+    !is.na(plot_dat[[x_p]]) &
+    plot_dat[[x_p]] < ku_sug_thresh
+
+
+  # Create marker labels
+  if (
+    !is.null(hatoum_marker) &&
+      hatoum_marker %in% names(plot_dat)
+  ) {
+
+    plot_dat$plot_marker <- ifelse(
+      !is.na(plot_dat[[hatoum_marker]]) &
+        plot_dat[[hatoum_marker]] != "",
+      plot_dat[[hatoum_marker]],
+      plot_dat$khat_marker
+    )
+
+  } else {
+
+    plot_dat$plot_marker <-
+      plot_dat$khat_marker
+  }
+
+
+  # Trait and sample-size labels
+  if (grepl("^ku_", pair_name)) {
+
+    khat_trait <- "Khat Use"
+    khat_n_label <- "KU N = 33,210"
+
+  } else {
+
+    khat_trait <- "Khat Use Frequency"
+    khat_n_label <- "KUF N = 25,869"
+  }
+
+  hatoum_label <- "Hatoum Addiction European"
+  sud_n_label <- "SUD N = 1,025,550"
+
+
+
+  # Count plotted variants with nominal KU/KUF association (P < 0.05)
+  khat_p05_count <- sum(
+    !is.na(plot_dat[[x_p]]) &
+      is.finite(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < 0.05
+  )
+
+  cat(
+    khat_trait,
+    " variants with P < 0.05:",
+    khat_p05_count,
+    "\n"
+  )
+
+  # Pearson correlation
+  if (
+    nrow(plot_dat) >= 3 &&
+      length(unique(plot_dat[[x_beta]])) >= 2 &&
+      length(unique(plot_dat[[y_beta]])) >= 2
+  ) {
+
+    pearson_test <- cor.test(
+      plot_dat[[x_beta]],
+      plot_dat[[y_beta]],
+      method = "pearson"
+    )
+
+    pearson_r <- unname(
+      pearson_test$estimate
+    )
+
+    pearson_p <- pearson_test$p.value
+
+    title_correlation <- paste0(
+      " | r = ",
+      round(pearson_r, 4)
+    )
+
+    correlation_label <- paste0(
+      "Pearson p = ",
+      format.pval(
+        pearson_p,
+        digits = 3,
+        eps = 1e-300
+      )
+    )
+
+  } else {
+
+    title_correlation <- ""
+
+    correlation_label <- paste0(
+      "Pearson correlation not calculated; ",
+      nrow(plot_dat),
+      " complete lead SNP",
+      ifelse(
+        nrow(plot_dat) == 1,
+        "",
+        "s"
+      ),
+      " available"
+    )
+  }
+
+
+  # Plot
+  # Generalized Deming regression
+  deming_results <- get_deming_results(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_se = "se_khat",
+    y_se = "se_hatoum"
+  )
+
+  add_comparison_summary(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_p = x_p,
+    khat_trait = khat_trait,
+    comparison_label = hatoum_label,
+    deming_results = deming_results
+  )
+
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+
+    # Horizontal 95% CIs for KU/KUF beta
+    geom_errorbar(
+      aes(
+        xmin = x_ci_lower,
+        xmax = x_ci_upper
+      ),
+      orientation = "y",
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Vertical 95% CIs for Hatoum beta
+    geom_errorbar(
+      aes(
+        ymin = y_ci_lower,
+        ymax = y_ci_upper
+      ),
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Plot every available Hatoum lead SNP
+    geom_point(
+      alpha = 0.6,
+      size = 3
+    ) +
+
+    # Ordinary least-squares line of best fit
+    {
+      if (
+        nrow(plot_dat) >= 2 &&
+          length(unique(plot_dat[[x_beta]])) >= 2
+      ) {
+
+        geom_smooth(
+          method = "lm",
+          formula = y ~ x,
+          se = FALSE,
+          color = "blue",
+          linetype = "dashed",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Generalized Deming regression line
+    {
+      if (
+        is.finite(deming_results$intercept) &&
+          is.finite(deming_results$slope)
+      ) {
+
+        geom_abline(
+          intercept = deming_results$intercept,
+          slope = deming_results$slope,
+          color = "blue",
+          linetype = "solid",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Highlight SNPs with KU/KUF p < 1e-5
+    geom_point(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      color = "red",
+      size = 3.5
+    ) +
+
+    # Label highlighted SNPs
+    geom_text_repel(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      aes(
+        label = plot_marker
+      ),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+
+    geom_hline(
+      yintercept = 0
+    ) +
+
+    geom_vline(
+      xintercept = 0
+    ) +
+
+    theme_bw() +
+
+    theme(
+      plot.title = element_text(
+        size = 10
+      ),
+      plot.subtitle = element_text(
+        size = 6
+      )
+    ) +
+
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x ",
+        hatoum_label,
+        " Lead SNPs",
+        title_correlation
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        sud_n_label,
+        " | Lead SNPs plotted = ",
+        nrow(plot_dat),
+        " | Error bars = reconstructed 95% CIs",
+        " | ",
+        deming_results$label,
+        " | ",
+        correlation_label
+      ),
+      x = paste0(
+        khat_trait,
+        " beta"
+      ),
+      y = "Hatoum Addiction beta"
+    )
+
+  print(p)
+}
+```
+
+```{r}
+# Johnson: setup, subset to lead SNPs, and calculate KU/KUF SE
+
+data_dir <- "/Users/nico/work/sud/johnson_lifted_harmonized"
+
+ku_sug_thresh <- 1e-5
+
+files <- list.files(
+  path = data_dir,
+  pattern = paste0(
+    "^(ku|kuf)_CUD_EUR_casecontrol_public_",
+    "11\\.14\\.2020_harmonized\\.txt$"
+  ),
+  full.names = TRUE
+)
+
+# Johnson genome-wide significant lead variants
+johnson_lead <- c(
+  "rs7783012",
+  "rs4732724"
+)
+
+cat("Files found:", length(files), "\n")
+print(basename(files))
+
+
+# Store lead-SNP datasets for plotting in Cell 2
+johnson_lead_data <- list()
+
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  is_ku <- grepl(
+    "^ku_",
+    basename(file)
+  )
+
+  if (is_ku) {
+
+    khat_beta <- "beta_ku"
+    khat_p <- "p_ku"
+
+  } else {
+
+    khat_beta <- "beta_kuf"
+    khat_p <- "p_kuf"
+  }
+
+
+  dat <- read.table(
+    file,
+    header = FALSE,
+    sep = "\t",
+    skip = 1,
+    fill = TRUE,
+    stringsAsFactors = FALSE,
+    col.names = c(
+      "khat_marker",
+      "CHR",
+      "BP",
+      "khat_A1",
+      "khat_A2",
+      khat_beta,
+      khat_p,
+      "johnson_marker",
+      "johnson_A1",
+      "johnson_A2",
+      "beta_CUD_EUR_casecontrol",
+      "beta_CUD_EUR_casecontrol_to_khat_A1",
+      "P",
+      "allele_match_status",
+      "SE",
+      "N",
+      "N_CAS",
+      "N_CON"
+    )
+  )
+
+
+  # Keep only the requested Johnson lead SNPs
+  dat_lead <- dat[
+    dat$khat_marker %in% johnson_lead |
+      dat$johnson_marker %in% johnson_lead,
+    ,
+    drop = FALSE
+  ]
+
+  cat(
+    "Requested Johnson lead SNPs:",
+    length(johnson_lead),
+    "\n"
+  )
+
+  cat(
+    "Lead SNP rows found:",
+    nrow(dat_lead),
+    "\n"
+  )
+
+
+  # Determine which lead SNPs were found
+  found_leads <- unique(
+    c(
+      dat_lead$khat_marker[
+        dat_lead$khat_marker %in% johnson_lead
+      ],
+      dat_lead$johnson_marker[
+        dat_lead$johnson_marker %in% johnson_lead
+      ]
+    )
+  )
+
+  found_leads <- found_leads[
+    !is.na(found_leads) &
+      found_leads != ""
+  ]
+
+  missing_leads <- setdiff(
+    johnson_lead,
+    found_leads
+  )
+
+  cat(
+    "Lead SNPs found:",
+    if (length(found_leads) > 0) {
+      paste(found_leads, collapse = ", ")
+    } else {
+      "none"
+    },
+    "\n"
+  )
+
+  if (length(missing_leads) > 0) {
+
+    cat(
+      "Lead SNPs missing:",
+      paste(missing_leads, collapse = ", "),
+      "\n"
+    )
+  }
+
+
+  if (nrow(dat_lead) == 0) {
+
+    cat(
+      "No Johnson lead SNPs found; skipping.\n"
+    )
+
+    next
+  }
+
+
+  # Convert required columns to numeric
+  dat_lead[[khat_beta]] <- as.numeric(
+    dat_lead[[khat_beta]]
+  )
+
+  dat_lead[[khat_p]] <- as.numeric(
+    dat_lead[[khat_p]]
+  )
+
+  dat_lead$beta_CUD_EUR_casecontrol_to_khat_A1 <-
+    as.numeric(
+      dat_lead$beta_CUD_EUR_casecontrol_to_khat_A1
+    )
+
+  dat_lead$P <- as.numeric(
+    dat_lead$P
+  )
+
+  # Johnson SE is already included in the input file
+  dat_lead$SE <- as.numeric(
+    dat_lead$SE
+  )
+
+
+  # Reconstruct signed KU/KUF Z-score from the two-sided p-value
+  #
+  # Z = sign(beta) * |Phi^(-1)(p / 2)|
+  dat_lead$z_khat <- ifelse(
+    !is.na(dat_lead[[khat_beta]]) &
+      is.finite(dat_lead[[khat_beta]]) &
+      !is.na(dat_lead[[khat_p]]) &
+      is.finite(dat_lead[[khat_p]]) &
+      dat_lead[[khat_p]] > 0 &
+      dat_lead[[khat_p]] < 1 &
+      dat_lead[[khat_beta]] != 0,
+
+    sign(dat_lead[[khat_beta]]) *
+      abs(qnorm(dat_lead[[khat_p]] / 2)),
+
+    NA_real_
+  )
+
+
+  # Reconstruct KU/KUF standard error
+  #
+  # SE = beta / Z
+  dat_lead$se_khat <- ifelse(
+    !is.na(dat_lead$z_khat) &
+      is.finite(dat_lead$z_khat) &
+      dat_lead$z_khat != 0,
+
+    dat_lead[[khat_beta]] /
+      dat_lead$z_khat,
+
+    NA_real_
+  )
+
+
+  # Give the reported Johnson SE a clearer name
+  dat_lead$se_johnson <- dat_lead$SE
+
+
+  # Store information needed by Cell 2
+  attr(dat_lead, "x_beta") <- khat_beta
+  attr(dat_lead, "x_p") <- khat_p
+
+
+  pair_name <- tools::file_path_sans_ext(
+    basename(file)
+  )
+
+  johnson_lead_data[[pair_name]] <- dat_lead
+
+
+  cat(
+    "Rows with reconstructed KU/KUF SE:",
+    sum(
+      !is.na(dat_lead$se_khat) &
+        is.finite(dat_lead$se_khat)
+    ),
+    "\n"
+  )
+
+  cat(
+    "Rows with reported Johnson SE:",
+    sum(
+      !is.na(dat_lead$se_johnson) &
+        is.finite(dat_lead$se_johnson)
+    ),
+    "\n"
+  )
+}
+
+
+# Inspect stored datasets
+names(johnson_lead_data)
+
+lapply(
+  johnson_lead_data,
+  function(dat) {
+
+    x_beta <- attr(dat, "x_beta")
+    x_p <- attr(dat, "x_p")
+
+    dat[
+      ,
+      c(
+        "khat_marker",
+        "johnson_marker",
+        x_beta,
+        x_p,
+        "z_khat",
+        "se_khat",
+        "beta_CUD_EUR_casecontrol_to_khat_A1",
+        "P",
+        "se_johnson"
+      ),
+      drop = FALSE
+    ]
+  }
+)
+```
+
+```{r}
+# Johnson: KU/KUF lead SNP comparison plots
+# Horizontal error bars: reconstructed KU/KUF 95% CI
+# Vertical error bars: reported Johnson 95% CI
+
+
+for (pair_name in names(johnson_lead_data)) {
+
+  cat("\nPlotting:", pair_name, "\n")
+
+  plot_dat <- johnson_lead_data[[pair_name]]
+
+  x_beta <- attr(
+    plot_dat,
+    "x_beta"
+  )
+
+  x_p <- attr(
+    plot_dat,
+    "x_p"
+  )
+
+  y_beta <- "beta_CUD_EUR_casecontrol_to_khat_A1"
+
+
+  # Set plot labels
+  if (grepl("^ku_", pair_name)) {
+
+    khat_trait <- "Khat Use"
+    khat_n_label <- "KU N = 33,210"
+
+  } else {
+
+    khat_trait <- "Khat Use Frequency"
+    khat_n_label <- "KUF N = 25,869"
+  }
+
+
+  # Retain rows with complete beta and SE values
+  plot_dat <- plot_dat[
+    !is.na(plot_dat[[x_beta]]) &
+      !is.na(plot_dat[[y_beta]]) &
+      !is.na(plot_dat$se_khat) &
+      !is.na(plot_dat$se_johnson) &
+      is.finite(plot_dat$se_khat) &
+      is.finite(plot_dat$se_johnson) &
+      plot_dat$se_khat >= 0 &
+      plot_dat$se_johnson >= 0,
+    ,
+    drop = FALSE
+  ]
+
+
+  cat(
+    "Complete lead SNPs available:",
+    nrow(plot_dat),
+    "\n"
+  )
+
+
+  if (nrow(plot_dat) == 0) {
+
+    cat(
+      "Skipping plot because no complete Johnson lead SNPs were found.\n"
+    )
+
+    next
+  }
+
+
+  # Orient KU/KUF beta positively
+  #
+  # Flip both aligned beta estimates together.
+  # Standard errors do not change.
+  flip_rows <- plot_dat[[x_beta]] < 0
+
+  cat(
+    "Lead SNPs flipped:",
+    sum(flip_rows),
+    "\n"
+  )
+
+  plot_dat[[x_beta]][flip_rows] <-
+    -plot_dat[[x_beta]][flip_rows]
+
+  plot_dat[[y_beta]][flip_rows] <-
+    -plot_dat[[y_beta]][flip_rows]
+
+
+  # Calculate 95% confidence intervals
+  plot_dat$x_ci_lower <-
+    plot_dat[[x_beta]] -
+    1.96 * plot_dat$se_khat
+
+  plot_dat$x_ci_upper <-
+    plot_dat[[x_beta]] +
+    1.96 * plot_dat$se_khat
+
+  plot_dat$y_ci_lower <-
+    plot_dat[[y_beta]] -
+    1.96 * plot_dat$se_johnson
+
+  plot_dat$y_ci_upper <-
+    plot_dat[[y_beta]] +
+    1.96 * plot_dat$se_johnson
+
+
+  # Highlight only SNPs with KU/KUF p < 1e-5
+  plot_dat$highlight <-
+    !is.na(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < ku_sug_thresh
+
+
+  cat(
+    "Lead SNPs highlighted at KU/KUF P < ",
+    ku_sug_thresh,
+    ": ",
+    sum(plot_dat$highlight),
+    "\n",
+    sep = ""
+  )
+
+
+  # Use Johnson marker for labels when available
+  plot_dat$plot_marker <- ifelse(
+    !is.na(plot_dat$johnson_marker) &
+      plot_dat$johnson_marker != "",
+    plot_dat$johnson_marker,
+    plot_dat$khat_marker
+  )
+
+
+
+  # Count plotted variants with nominal KU/KUF association (P < 0.05)
+  khat_p05_count <- sum(
+    !is.na(plot_dat[[x_p]]) &
+      is.finite(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < 0.05
+  )
+
+  cat(
+    khat_trait,
+    " variants with P < 0.05:",
+    khat_p05_count,
+    "\n"
+  )
+
+  # Pearson correlation
+  #
+  # Johnson has only two requested lead SNPs, so Pearson
+  # correlation will generally not be calculated.
+  if (
+    nrow(plot_dat) >= 3 &&
+      length(unique(plot_dat[[x_beta]])) >= 2 &&
+      length(unique(plot_dat[[y_beta]])) >= 2
+  ) {
+
+    pearson_test <- cor.test(
+      plot_dat[[x_beta]],
+      plot_dat[[y_beta]],
+      method = "pearson"
+    )
+
+    pearson_r <- unname(
+      pearson_test$estimate
+    )
+
+    pearson_p <- pearson_test$p.value
+
+    title_correlation <- paste0(
+      " | r = ",
+      round(pearson_r, 4)
+    )
+
+    correlation_label <- paste0(
+      "Pearson p = ",
+      format.pval(
+        pearson_p,
+        digits = 3,
+        eps = 1e-300
+      )
+    )
+
+  } else {
+
+    title_correlation <- ""
+
+    correlation_label <- paste0(
+      "Pearson correlation not calculated; ",
+      nrow(plot_dat),
+      " complete lead SNP",
+      ifelse(
+        nrow(plot_dat) == 1,
+        "",
+        "s"
+      ),
+      " available"
+    )
+  }
+
+
+  # Generalized Deming regression
+  deming_results <- get_deming_results(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_se = "se_khat",
+    y_se = "se_johnson"
+  )
+
+  add_comparison_summary(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_p = x_p,
+    khat_trait = khat_trait,
+    comparison_label = "Johnson CUD European Case-Control",
+    deming_results = deming_results
+  )
+
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+
+    # Horizontal KU/KUF 95% confidence intervals
+    geom_errorbar(
+      aes(
+        xmin = x_ci_lower,
+        xmax = x_ci_upper
+      ),
+      orientation = "y",
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Vertical Johnson 95% confidence intervals
+    geom_errorbar(
+      aes(
+        ymin = y_ci_lower,
+        ymax = y_ci_upper
+      ),
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Plot every available Johnson lead SNP
+    geom_point(
+      alpha = 0.6,
+      size = 3
+    ) +
+
+    # Ordinary least-squares line of best fit
+    {
+      if (
+        nrow(plot_dat) >= 2 &&
+          length(unique(plot_dat[[x_beta]])) >= 2
+      ) {
+
+        geom_smooth(
+          method = "lm",
+          formula = y ~ x,
+          se = FALSE,
+          color = "blue",
+          linetype = "dashed",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Generalized Deming regression line
+    {
+      if (
+        is.finite(deming_results$intercept) &&
+          is.finite(deming_results$slope)
+      ) {
+
+        geom_abline(
+          intercept = deming_results$intercept,
+          slope = deming_results$slope,
+          color = "blue",
+          linetype = "solid",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Highlight SNPs with KU/KUF p < 1e-5
+    geom_point(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      color = "red",
+      size = 3.5
+    ) +
+
+    # Label highlighted SNPs
+    geom_text_repel(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      aes(
+        label = plot_marker
+      ),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+
+    geom_hline(
+      yintercept = 0
+    ) +
+
+    geom_vline(
+      xintercept = 0
+    ) +
+
+    theme_bw() +
+
+    theme(
+      plot.title = element_text(
+        size = 11
+      ),
+      plot.subtitle = element_text(
+        size = 5.5
+      )
+    ) +
+
+    labs(
+      title = paste0(
+        "NGAP ",
+        khat_trait,
+        " x Johnson CUD European Case-Control Lead SNPs",
+        title_correlation
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | CUD N = 357,806",
+        " | Lead SNPs plotted = ",
+        nrow(plot_dat),
+        " | Error bars = 95% CIs",
+        " | ",
+        deming_results$label,
+        " | ",
+        correlation_label
+      ),
+      x = paste0(
+        khat_trait,
+        " beta"
+      ),
+      y = "Johnson CUD beta"
+    )
+
+  print(p)
+}
+```
+
+```{r}
+# Levey: subset to lead SNPs and prepare SEs
+
+data_dir <- "/Users/nico/work/sud/levey_lifted_harmonized"
+
+ku_sug_thresh <- 1e-5
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_(AFR|EUR)_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+levey_lead <- c(
+  "rs7519259",
+  "rs6690119",
+  "rs1526480",
+  "rs719504",
+  "rs184064410",
+  "rs3774800",
+  "rs17007864",
+  "rs726610",
+  "rs201175241",
+  "rs56070621",
+  "rs159365",
+  "rs9344740",
+  "rs62461183",
+  "rs2189010",
+  "rs545943750",
+  "rs56372821",
+  "rs10986600",
+  "rs200595759",
+  "rs6484345",
+  "rs34554234",
+  "rs80030908",
+  "rs62051488"
+)
+
+cat("Number of files found:", length(files), "\n")
+print(basename(files))
+
+
+levey_lead_data <- list()
+
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+  x_beta <- grep(
+    "^beta_ku$|^beta_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+  x_p <- grep(
+    "^p_ku$|^p_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+  y_beta <- grep(
+    "_to_khat_A1$",
+    names(dat),
+    value = TRUE
+  )
+
+  # Search for Levey p-value column
+  y_p_candidates <- grep(
+    "^P$|^p$|pval|p_value|pvalue",
+    names(dat),
+    value = TRUE,
+    ignore.case = TRUE
+  )
+
+  # Exclude KU/KUF p-value column
+  y_p_candidates <- setdiff(
+    y_p_candidates,
+    x_p
+  )
+
+  # Search for an original Levey SE column
+  y_se_candidates <- grep(
+    "^SE$|stderr|std_err|standard_error|^se_",
+    names(dat),
+    value = TRUE,
+    ignore.case = TRUE
+  )
+
+  # Exclude possible KU/KUF SE columns
+  y_se_candidates <- y_se_candidates[
+    !grepl(
+      "ku|kuf",
+      y_se_candidates,
+      ignore.case = TRUE
+    )
+  ]
+
+  cat("x_beta:", paste(x_beta, collapse = ", "), "\n")
+  cat("x_p:", paste(x_p, collapse = ", "), "\n")
+  cat("y_beta:", paste(y_beta, collapse = ", "), "\n")
+  cat(
+    "Levey p candidates:",
+    paste(y_p_candidates, collapse = ", "),
+    "\n"
+  )
+  cat(
+    "Levey SE candidates:",
+    paste(y_se_candidates, collapse = ", "),
+    "\n"
+  )
+
+  if (
+    length(x_beta) != 1 ||
+      length(x_p) != 1 ||
+      length(y_beta) != 1 ||
+      !("khat_marker" %in% names(dat))
+  ) {
+
+    cat(
+      "Skipping because required beta, p-value, or marker columns were not identified.\n"
+    )
+
+    print(names(dat))
+    next
+  }
+
+
+  # Select Levey p-value if exactly one candidate exists
+  if (length(y_p_candidates) == 1) {
+
+    y_p <- y_p_candidates
+
+  } else {
+
+    y_p <- NULL
+  }
+
+
+  # Select original Levey SE if exactly one candidate exists
+  if (length(y_se_candidates) == 1) {
+
+    y_se <- y_se_candidates
+
+  } else {
+
+    y_se <- NULL
+  }
+
+
+  # Identify Levey marker column
+  if ("levey_marker" %in% names(dat)) {
+
+    levey_marker <- "levey_marker"
+
+  } else {
+
+    marker_candidates <- grep(
+      "marker$|^SNP$|^rsid$",
+      names(dat),
+      value = TRUE,
+      ignore.case = TRUE
+    )
+
+    marker_candidates <- setdiff(
+      marker_candidates,
+      "khat_marker"
+    )
+
+    if (length(marker_candidates) > 0) {
+
+      levey_marker <- marker_candidates[1]
+
+    } else {
+
+      levey_marker <- NULL
+    }
+  }
+
+
+  # Keep only requested lead SNPs
+  if (!is.null(levey_marker)) {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% levey_lead |
+        dat[[levey_marker]] %in% levey_lead,
+      ,
+      drop = FALSE
+    ]
+
+  } else {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% levey_lead,
+      ,
+      drop = FALSE
+    ]
+  }
+
+
+  cat("Lead SNP rows found:", nrow(dat_lead), "\n")
+
+
+  if (nrow(dat_lead) == 0) {
+
+    cat("No requested lead SNPs found; skipping.\n")
+    next
+  }
+
+
+  # Convert required values to numeric
+  dat_lead[[x_beta]] <- as.numeric(
+    dat_lead[[x_beta]]
+  )
+
+  dat_lead[[x_p]] <- as.numeric(
+    dat_lead[[x_p]]
+  )
+
+  dat_lead[[y_beta]] <- as.numeric(
+    dat_lead[[y_beta]]
+  )
+
+
+  # Reconstruct signed KU/KUF Z-score and standard error
+  #
+  # Z  = sign(beta) * |Phi^(-1)(p / 2)|
+  # SE = beta / Z
+  dat_lead$z_khat <- ifelse(
+    !is.na(dat_lead[[x_beta]]) &
+      is.finite(dat_lead[[x_beta]]) &
+      !is.na(dat_lead[[x_p]]) &
+      is.finite(dat_lead[[x_p]]) &
+      dat_lead[[x_p]] > 0 &
+      dat_lead[[x_p]] < 1 &
+      dat_lead[[x_beta]] != 0,
+
+    sign(dat_lead[[x_beta]]) *
+      abs(qnorm(dat_lead[[x_p]] / 2)),
+
+    NA_real_
+  )
+
+  dat_lead$se_khat <- ifelse(
+    !is.na(dat_lead$z_khat) &
+      is.finite(dat_lead$z_khat) &
+      dat_lead$z_khat != 0,
+
+    dat_lead[[x_beta]] /
+      dat_lead$z_khat,
+
+    NA_real_
+  )
+
+
+  # Use original Levey SE when available
+  if (!is.null(y_se)) {
+
+    dat_lead[[y_se]] <- as.numeric(
+      dat_lead[[y_se]]
+    )
+
+    dat_lead$se_levey <- dat_lead[[y_se]]
+
+    cat(
+      "Using reported Levey SE column:",
+      y_se,
+      "\n"
+    )
+
+  } else if (!is.null(y_p)) {
+
+    # Otherwise reconstruct Levey SE from beta and p-value
+    dat_lead[[y_p]] <- as.numeric(
+      dat_lead[[y_p]]
+    )
+
+    dat_lead$z_levey <- ifelse(
+      !is.na(dat_lead[[y_beta]]) &
+        is.finite(dat_lead[[y_beta]]) &
+        !is.na(dat_lead[[y_p]]) &
+        is.finite(dat_lead[[y_p]]) &
+        dat_lead[[y_p]] > 0 &
+        dat_lead[[y_p]] < 1 &
+        dat_lead[[y_beta]] != 0,
+
+      sign(dat_lead[[y_beta]]) *
+        abs(qnorm(dat_lead[[y_p]] / 2)),
+
+      NA_real_
+    )
+
+    dat_lead$se_levey <- ifelse(
+      !is.na(dat_lead$z_levey) &
+        is.finite(dat_lead$z_levey) &
+        dat_lead$z_levey != 0,
+
+      dat_lead[[y_beta]] /
+        dat_lead$z_levey,
+
+      NA_real_
+    )
+
+    cat(
+      "Reconstructed Levey SE using p-value column:",
+      y_p,
+      "\n"
+    )
+
+  } else {
+
+    dat_lead$se_levey <- NA_real_
+
+    cat(
+      "No Levey SE or p-value column was identified.\n"
+    )
+  }
+
+
+  attr(dat_lead, "x_beta") <- x_beta
+  attr(dat_lead, "x_p") <- x_p
+  attr(dat_lead, "y_beta") <- y_beta
+  attr(dat_lead, "levey_marker") <- levey_marker
+
+
+  pair_name <- tools::file_path_sans_ext(
+    basename(file)
+  )
+
+  levey_lead_data[[pair_name]] <- dat_lead
+
+
+  cat(
+    "Dataset saved:",
+    pair_name,
+    "| rows =",
+    nrow(dat_lead),
+    "| complete KU/KUF SE =",
+    sum(
+      is.finite(dat_lead$se_khat),
+      na.rm = TRUE
+    ),
+    "| complete Levey SE =",
+    sum(
+      is.finite(dat_lead$se_levey),
+      na.rm = TRUE
+    ),
+    "\n"
+  )
+}
+
+
+cat(
+  "\nDatasets prepared:",
+  length(levey_lead_data),
+  "\n"
+)
+
+print(names(levey_lead_data))
+```
+
+
+```{r}
+# Levey: plot lead SNP comparisons with 95% confidence intervals
+
+
+cat(
+  "Number of datasets to plot:",
+  length(levey_lead_data),
+  "\n"
+)
+
+
+if (length(levey_lead_data) == 0) {
+
+  stop(
+    paste0(
+      "levey_lead_data is empty. ",
+      "Run the preceding preparation cell and inspect its messages."
+    )
+  )
+}
+
+
+for (pair_name in names(levey_lead_data)) {
+
+  cat("\nPlotting:", pair_name, "\n")
+
+  plot_dat <- levey_lead_data[[pair_name]]
+
+  x_beta <- attr(
+    plot_dat,
+    "x_beta"
+  )
+
+  x_p <- attr(
+    plot_dat,
+    "x_p"
+  )
+
+  y_beta <- attr(
+    plot_dat,
+    "y_beta"
+  )
+
+  levey_marker <- attr(
+    plot_dat,
+    "levey_marker"
+  )
+
+
+  if (grepl("^ku_", pair_name)) {
+
+    khat_trait <- "Khat Use"
+    khat_n_label <- "KU N = 33,210"
+
+  } else {
+
+    khat_trait <- "Khat Use Frequency"
+    khat_n_label <- "KUF N = 25,869"
+  }
+
+
+  if (grepl("_AFR_", pair_name)) {
+
+    ancestry_label <- "African"
+    cud_n_label <- "CUD N = 123,208"
+
+  } else {
+
+    ancestry_label <- "European"
+    cud_n_label <- "CUD N = 886,025"
+  }
+
+
+  # Keep complete beta and SE rows
+  plot_dat <- plot_dat[
+    !is.na(plot_dat[[x_beta]]) &
+      !is.na(plot_dat[[y_beta]]) &
+      !is.na(plot_dat$se_khat) &
+      !is.na(plot_dat$se_levey) &
+      is.finite(plot_dat$se_khat) &
+      is.finite(plot_dat$se_levey) &
+      plot_dat$se_khat >= 0 &
+      plot_dat$se_levey >= 0,
+    ,
+    drop = FALSE
+  ]
+
+
+  cat(
+    "Rows remaining after beta/SE filtering:",
+    nrow(plot_dat),
+    "\n"
+  )
+
+
+  if (nrow(plot_dat) == 0) {
+
+    cat(
+      "No complete rows available; skipping this plot.\n"
+    )
+
+    next
+  }
+
+
+  # Orient KU/KUF beta positively
+  flip_rows <- plot_dat[[x_beta]] < 0
+
+  plot_dat[[x_beta]][flip_rows] <-
+    -plot_dat[[x_beta]][flip_rows]
+
+  plot_dat[[y_beta]][flip_rows] <-
+    -plot_dat[[y_beta]][flip_rows]
+
+
+  # Calculate 95% confidence intervals
+  plot_dat$x_ci_lower <-
+    plot_dat[[x_beta]] -
+    1.96 * plot_dat$se_khat
+
+  plot_dat$x_ci_upper <-
+    plot_dat[[x_beta]] +
+    1.96 * plot_dat$se_khat
+
+  plot_dat$y_ci_lower <-
+    plot_dat[[y_beta]] -
+    1.96 * plot_dat$se_levey
+
+  plot_dat$y_ci_upper <-
+    plot_dat[[y_beta]] +
+    1.96 * plot_dat$se_levey
+
+
+  plot_dat$highlight <-
+    !is.na(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < ku_sug_thresh
+
+
+  if (
+    !is.null(levey_marker) &&
+      levey_marker %in% names(plot_dat)
+  ) {
+
+    plot_dat$plot_marker <- ifelse(
+      !is.na(plot_dat[[levey_marker]]) &
+        plot_dat[[levey_marker]] != "",
+      plot_dat[[levey_marker]],
+      plot_dat$khat_marker
+    )
+
+  } else {
+
+    plot_dat$plot_marker <-
+      plot_dat$khat_marker
+  }
+
+
+
+  # Count plotted variants with nominal KU/KUF association (P < 0.05)
+  khat_p05_count <- sum(
+    !is.na(plot_dat[[x_p]]) &
+      is.finite(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < 0.05
+  )
+
+  cat(
+    khat_trait,
+    " variants with P < 0.05:",
+    khat_p05_count,
+    "\n"
+  )
+
+  # Pearson correlation
+  if (
+    nrow(plot_dat) >= 3 &&
+      length(unique(plot_dat[[x_beta]])) >= 2 &&
+      length(unique(plot_dat[[y_beta]])) >= 2
+  ) {
+
+    pearson_test <- cor.test(
+      plot_dat[[x_beta]],
+      plot_dat[[y_beta]],
+      method = "pearson"
+    )
+
+    title_correlation <- paste0(
+      " | r = ",
+      round(
+        unname(pearson_test$estimate),
+        4
+      )
+    )
+
+    correlation_label <- paste0(
+      "Pearson p = ",
+      format.pval(
+        pearson_test$p.value,
+        digits = 3,
+        eps = 1e-300
+      )
+    )
+
+  } else {
+
+    title_correlation <- ""
+
+    correlation_label <- paste0(
+      "Pearson correlation not calculated; ",
+      nrow(plot_dat),
+      " complete lead SNP",
+      ifelse(
+        nrow(plot_dat) == 1,
+        "",
+        "s"
+      ),
+      " available"
+    )
+  }
+
+
+  # Generalized Deming regression
+  deming_results <- get_deming_results(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_se = "se_khat",
+    y_se = "se_levey"
+  )
+
+  add_comparison_summary(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_p = x_p,
+    khat_trait = khat_trait,
+    comparison_label = paste0("Levey ", ancestry_label, " CUD"),
+    deming_results = deming_results
+  )
+
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+
+    geom_errorbar(
+      aes(
+        xmin = x_ci_lower,
+        xmax = x_ci_upper
+      ),
+      orientation = "y",
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    geom_errorbar(
+      aes(
+        ymin = y_ci_lower,
+        ymax = y_ci_upper
+      ),
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    geom_point(
+      alpha = 0.6,
+      size = 3
+    ) +
+
+    # Ordinary least-squares line of best fit
+    {
+      if (
+        nrow(plot_dat) >= 2 &&
+          length(unique(plot_dat[[x_beta]])) >= 2
+      ) {
+
+        geom_smooth(
+          method = "lm",
+          formula = y ~ x,
+          se = FALSE,
+          color = "blue",
+          linetype = "dashed",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Generalized Deming regression line
+    {
+      if (
+        is.finite(deming_results$intercept) &&
+          is.finite(deming_results$slope)
+      ) {
+
+        geom_abline(
+          intercept = deming_results$intercept,
+          slope = deming_results$slope,
+          color = "blue",
+          linetype = "solid",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    geom_point(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      color = "red",
+      size = 3.5
+    ) +
+
+    geom_text_repel(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      aes(
+        label = plot_marker
+      ),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+
+    geom_hline(
+      yintercept = 0
+    ) +
+
+    geom_vline(
+      xintercept = 0
+    ) +
+
+    theme_bw() +
+
+    theme(
+      plot.title = element_text(
+        size = 12
+      ),
+      plot.subtitle = element_text(
+        size = 7
+      )
+    ) +
+
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x Levey ",
+        ancestry_label,
+        " CUD Lead SNPs",
+        title_correlation
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        cud_n_label,
+        " | Lead SNPs plotted = ",
+        nrow(plot_dat),
+        " | Error bars = 95% CIs",
+        " | ",
+        deming_results$label,
+        " | ",
+        correlation_label
+      ),
+      x = paste0(
+        khat_trait,
+        " beta"
+      ),
+      y = paste0(
+        "Levey ",
+        ancestry_label,
+        " CUD beta"
+      )
+    )
+
+  print(p)
+}
+```
+
+
+```{r}
+# Lead vars from GSCAN: Liu
+
+# Please refer here for rsID information: 
+# https://static-content.springer.com/esm/art%3A10.1038%2Fs41588-018-0307-5/MediaObjects/41588_2018_307_MOESM3_ESM.xlsx
+
+# Age of Initiation: 428 unique RSIDs
+# Unique rsIDs from Supplementary Table 19 with GWAS P < 5e-8
+
+# Age of Initiation of Regular Smoking: 20 unique RSIDs
+liu_age_of_initiation_lead <- c(
+  "rs13431584", "rs141120421", "rs62177751", "rs7559982", "rs78030021", "rs624833", "rs147137183", "rs11780471",
+  "rs762855", "rs13136239", "rs1403174", "rs7682598", "rs11915747", "rs3943782", "rs62253086", "rs2471711",
+  "rs59721547", "rs1533427", "rs6755330", "rs72853300"
+)
+
+# Cigarettes per Day: 150 unique RSIDs
+liu_cigarettes_per_day_lead <- c(
+  "rs6078373", "rs113001570", "rs11605503", "rs41299181", "rs12490052", "rs139305679", "rs74777020", "rs11711814",
+  "rs11715134", "rs2236951", "rs13092715", "rs56324858", "rs7431710", "rs2216933", "rs7599488", "rs972337",
+  "rs12932628", "rs67689854", "rs11846838", "rs10204824", "rs10928378", "rs2084533", "rs59208569", "rs117877022",
+  "rs12541969", "rs148168945", "rs2199889", "rs4236926", "rs4144686", "rs4801149", "rs9957668", "rs1024323",
+  "rs258321", "rs1403763", "rs699165", "rs34973462", "rs12281119", "rs4539287", "rs7924783", "rs7951365",
+  "rs1115019", "rs10519203", "rs1052035", "rs112272197", "rs12913946", "rs141607049", "rs143520742", "rs143527274",
+  "rs147760547", "rs16969892", "rs187618975", "rs189302121", "rs2229961", "rs146722791", "rs2306469", "rs28450923",
+  "rs2929148", "rs3971828", "rs4887101", "rs56219480", "rs62010961", "rs62012628", "rs6495304", "rs71407279",
+  "rs7171869", "rs72740960", "rs72745113", "rs73467256", "rs74024464", "rs74386627", "rs75430714", "rs76189127",
+  "rs192710189", "rs76426232", "rs76912891", "rs79409323", "rs8034274", "rs8039661", "rs17123165", "rs1737894",
+  "rs1742982", "rs2072659", "rs7537208", "rs117824460", "rs118060349", "rs141353121", "rs141777035", "rs2561566",
+  "rs28399433", "rs28399442", "rs34842714", "rs34854596", "rs3844442", "rs406133", "rs4278858", "rs56113850",
+  "rs66500423", "rs736625", "rs7507400", "rs75112710", "rs79433273", "rs12924872", "rs138784492", "rs113411125",
+  "rs7281463", "rs632811", "rs11264100", "rs10217013", "rs12677930", "rs790564", "rs2273500", "rs3865527",
+  "rs72629023", "rs75710580", "rs79739740", "rs1592485", "rs4485470", "rs117056642", "rs11791358", "rs3025321",
+  "rs3025383", "rs56116178", "rs7848286", "rs7854393", "rs62447179", "rs215600", "rs215700", "rs28504131",
+  "rs2514225", "rs4630328", "rs7125588", "rs7940164", "rs116999898", "rs80310688", "rs182317", "rs11940255",
+  "rs10742683", "rs7820068", "rs78408772", "rs13141210", "rs183523077", "rs6818650", "rs115994486", "rs139309628",
+  "rs62120871", "rs7260329", "rs79436912", "rs9676346", "rs2741351", "rs73229090"
+)
+
+# Smoking Cessation: 62 unique RSIDs
+liu_smoking_cessation_lead <- c(
+  "rs2076196", "rs139550", "rs67222508", "rs9607805", "rs3866543", "rs66508953", "rs8114049", "rs11130217",
+  "rs71615484", "rs1264194", "rs7617480", "rs9815930", "rs4809300", "rs45568238", "rs58580020", "rs6011779",
+  "rs6089904", "rs78023168", "rs79739740", "rs10414540", "rs10416308", "rs34854596", "rs35061187", "rs4803361",
+  "rs66500423", "rs7507400", "rs2622165", "rs6951475", "rs112187834", "rs115073616", "rs199642525", "rs518425",
+  "rs12378015", "rs1029372", "rs10761413", "rs10993863", "rs10993864", "rs117877503", "rs2007153", "rs3025327",
+  "rs4531", "rs9409844", "rs111944606", "rs12900091", "rs28618329", "rs591143", "rs60749569", "rs7778443",
+  "rs13180043", "rs12203592", "rs9392574", "rs112292570", "rs117824460", "rs145402786", "rs56113850", "rs59586387",
+  "rs7109376", "rs1565735", "rs4732723", "rs150652775", "rs7256675", "rs892216"
+)
+
+# Smoking Initiation: 808 unique RSIDs
+liu_smoking_initiation_lead <- c(
+  "rs1373178", "rs4128955", "rs62098013", "rs7237773", "rs72924602", "rs8083764", "rs1570892", "rs1885949",
+  "rs9540731", "rs9599107", "rs3764351", "rs12130857", "rs17417989", "rs17583177", "rs2155646", "rs2846911",
+  "rs4143165", "rs55718642", "rs873803", "rs115771676", "rs11678980", "rs140023346", "rs17287470", "rs4293573",
+  "rs6719301", "rs7943721", "rs10966092", "rs11795350", "rs2771046", "rs7852159", "rs12022778", "rs1305490",
+  "rs3934240", "rs72681063", "rs72686784", "rs116931390", "rs12244388", "rs12769080", "rs2487862", "rs75890466",
+  "rs7904248", "rs12199099", "rs12195240", "rs2450516", "rs3125570", "rs1187820", "rs16828799", "rs2276825",
+  "rs10452032", "rs114310066", "rs116192940", "rs140021702", "rs115197579", "rs147518181", "rs190848966", "rs2526384",
+  "rs3172494", "rs3852064", "rs11721328", "rs200559437", "rs4234465", "rs62248598", "rs62259535", "rs62260764",
+  "rs62263033", "rs71326918", "rs73077107", "rs79672978", "rs9868262", "rs1018436", "rs10945141", "rs2341766",
+  "rs3798971", "rs2939756", "rs12714017", "rs1434206", "rs6727872", "rs6750107", "rs9826984", "rs67320678",
+  "rs7505855", "rs2344976", "rs10490159", "rs13032994", "rs3842981", "rs7598402", "rs1139897", "rs12929823",
+  "rs6986430", "rs6993429", "rs72673548", "rs9987376", "rs116236747", "rs12637371", "rs12714592", "rs13059866",
+  "rs148226321", "rs1549979", "rs17448879", "rs190417802", "rs4552369", "rs57153235", "rs12633090", "rs1351046",
+  "rs1452168", "rs60538752", "rs6809274", "rs73121374", "rs73135629", "rs79755408", "rs9841778", "rs986035",
+  "rs9869154", "rs9877971", "rs9879003", "rs11057005", "rs10091396", "rs2565059", "rs1530569", "rs7006183",
+  "rs1291210", "rs3810496", "rs150398197", "rs4822102", "rs12755632", "rs114920124", "rs117521606", "rs17692129",
+  "rs199856093", "rs11956866", "rs252943", "rs11192130", "rs12411580", "rs1855582", "rs4400723", "rs61867124",
+  "rs61867344", "rs9787523", "rs10194613", "rs138321268", "rs1445649", "rs7566297", "rs877055", "rs12269736",
+  "rs3820277", "rs1799068", "rs2107717", "rs34734977", "rs10474278", "rs12658195", "rs2115459", "rs454822",
+  "rs62378173", "rs62380114", "rs6452785", "rs662230", "rs12739243", "rs35169606", "rs2718791", "rs35589824",
+  "rs35600279", "rs7631379", "rs2740792", "rs9538162", "rs73831818", "rs62340589", "rs1030015", "rs73135595",
+  "rs7802996", "rs11191269", "rs11191286", "rs11594623", "rs117305908", "rs117526247", "rs1867931", "rs4919609",
+  "rs76569850", "rs77516398", "rs7901883", "rs1889571", "rs945211", "rs7192140", "rs3740977", "rs181350618",
+  "rs10742833", "rs139065331", "rs74873109", "rs75912046", "rs11076962", "rs6500742", "rs72778533", "rs813913",
+  "rs4674993", "rs1393730", "rs7218019", "rs75919030", "rs1531576", "rs2409750", "rs4326350", "rs6980908",
+  "rs7016598", "rs75946928", "rs230112", "rs4837631", "rs3803064", "rs11066309", "rs2239194", "rs4766578",
+  "rs77215829", "rs7961935", "rs144947018", "rs2279829", "rs67777803", "rs2901785", "rs6425305", "rs10959433",
+  "rs17234745", "rs1931431", "rs3891649", "rs1617033", "rs34940743", "rs8005334", "rs8017057", "rs62007780",
+  "rs113968734", "rs11649341", "rs11640038", "rs11644340", "rs149289541", "rs62047964", "rs62052916", "rs62053796",
+  "rs62055044", "rs6499595", "rs67771172", "rs7185714", "rs76098878", "rs8060185", "rs9302604", "rs9936784",
+  "rs35264168", "rs6050446", "rs13007361", "rs4756044", "rs117734003", "rs10953957", "rs11978249", "rs1548744",
+  "rs11582111", "rs1841252", "rs2613496", "rs357201", "rs7524249", "rs1164598", "rs118079847", "rs75674569",
+  "rs11078713", "rs28441558", "rs12053870", "rs1909588", "rs34882592", "rs4605536", "rs4687991", "rs6438436",
+  "rs7650244", "rs114050142", "rs10812673", "rs10969352", "rs7848886", "rs17269323", "rs62012051", "rs144040667",
+  "rs72751639", "rs10140076", "rs1811739", "rs4903541", "rs113411125", "rs13050688", "rs2239384", "rs2835985",
+  "rs4818005", "rs858041", "rs139896", "rs2010472", "rs10490091", "rs17616642", "rs58487004", "rs60790835",
+  "rs67174662", "rs6734833", "rs67604407", "rs113049808", "rs114712363", "rs12615147", "rs13034231", "rs155571",
+  "rs35230440", "rs359247", "rs7585579", "rs7597742", "rs76089684", "rs767012", "rs12614208", "rs62177748",
+  "rs62180324", "rs78597779", "rs12965363", "rs17514601", "rs2852978", "rs72926932", "rs72938304", "rs28581547",
+  "rs10228917", "rs10233018", "rs10247768", "rs141488017", "rs38818", "rs79038827", "rs1109480", "rs34553878",
+  "rs114673998", "rs116094182", "rs140853423", "rs1714521", "rs4680401", "rs340317", "rs6804180", "rs9864196",
+  "rs876793", "rs9288999", "rs73351140", "rs114726653", "rs2039530", "rs3120803", "rs588657", "rs951740",
+  "rs141789202", "rs3811038", "rs75210106", "rs906846", "rs10858334", "rs1004787", "rs10168523", "rs163525",
+  "rs78040378", "rs13906", "rs13180043", "rs17197663", "rs3904512", "rs6874731", "rs11748954", "rs187158470",
+  "rs2088689", "rs2173019", "rs2921533", "rs347996", "rs4044321", "rs4368756", "rs55781107", "rs6890961",
+  "rs6893351", "rs79379057", "rs79476395", "rs9687011", "rs11162019", "rs6678805", "rs7539132", "rs117582306",
+  "rs138088001", "rs13036436", "rs10894528", "rs1106363", "rs11222953", "rs2010921", "rs641075", "rs732897",
+  "rs78058594", "rs10209281", "rs13383155", "rs34399632", "rs6430634", "rs10516930", "rs1160685", "rs264038",
+  "rs4912332", "rs11713899", "rs17165769", "rs6594306", "rs7552775", "rs925524", "rs76841737", "rs11768481",
+  "rs1291821", "rs13083349", "rs4543050", "rs11766326", "rs56902655", "rs619087", "rs586699", "rs77171716",
+  "rs13110073", "rs35123039", "rs75045002", "rs9968288", "rs6782116", "rs935526", "rs9323328", "rs1937443",
+  "rs1999856", "rs3795530", "rs6703532", "rs3218116", "rs1514176", "rs12027999", "rs12153007", "rs986714",
+  "rs28656885", "rs34342129", "rs2023553", "rs1737329", "rs72790288", "rs35375873", "rs147052174", "rs644740",
+  "rs6098850", "rs910912", "rs61886926", "rs78593560", "rs60833441", "rs10935779", "rs12620124", "rs357304",
+  "rs73021793", "rs1310173", "rs185518937", "rs34555601", "rs3850736", "rs11121157", "rs301807", "rs12438387",
+  "rs281296", "rs7169820", "rs74013805", "rs75772884", "rs8034783", "rs59981137", "rs8096225", "rs221988",
+  "rs4310804", "rs10456891", "rs10203512", "rs34657012", "rs61533748", "rs920273", "rs11651955", "rs11762075",
+  "rs17141032", "rs4717533", "rs6976362", "rs7799096", "rs7809303", "rs16974545", "rs6497840", "rs4785187",
+  "rs71382768", "rs76796131", "rs8048073", "rs8050598", "rs11642231", "rs10873871", "rs12409870", "rs58483436",
+  "rs11872397", "rs12517438", "rs17395157", "rs10060196", "rs60635486", "rs72789626", "rs13392222", "rs9308833",
+  "rs17658489", "rs3012677", "rs3847244", "rs4740716", "rs78291150", "rs13437771", "rs148473909", "rs10914684",
+  "rs2289791", "rs34583567", "rs13261666", "rs28820372", "rs118202", "rs12198881", "rs174405", "rs17539385",
+  "rs17806852", "rs2071926", "rs4947121", "rs3011629", "rs7072776", "rs13402761", "rs62193862", "rs10446419",
+  "rs4393870", "rs2068858", "rs58400863", "rs1028802", "rs16896199", "rs2002956", "rs4458660", "rs7743165",
+  "rs79844070", "rs851591", "rs8027457", "rs11030112", "rs6265", "rs1002202", "rs11128203", "rs62246017",
+  "rs75697183", "rs76976872", "rs62618693", "rs7836565", "rs7188873", "rs290601", "rs6061162", "rs76833217",
+  "rs11692435", "rs78783493", "rs7600835", "rs117657830", "rs828867", "rs1050847", "rs444173", "rs10279261",
+  "rs13246630", "rs17654334", "rs56372533", "rs76287966", "rs2587507", "rs13237637", "rs17133347", "rs61752593",
+  "rs62437876", "rs67926418", "rs75707877", "rs7794763", "rs7806494", "rs78141748", "rs72898831", "rs11587399",
+  "rs3800227", "rs117695734", "rs4329721", "rs4140932", "rs160631", "rs7969559", "rs1126757", "rs2796793",
+  "rs11616731", "rs12431159", "rs55781196", "rs9300585", "rs1540840", "rs4606654", "rs55913542", "rs62619922",
+  "rs2157934", "rs6968380", "rs2710634", "rs7867822", "rs1334526", "rs1733760", "rs1025818", "rs748832",
+  "rs75313781", "rs2028269", "rs10030552", "rs13109980", "rs1455480", "rs4752018", "rs1724562", "rs7696257",
+  "rs9626905", "rs9627272", "rs7594223", "rs10067492", "rs103258", "rs255373", "rs42417", "rs72779412",
+  "rs11989029", "rs2952251", "rs17229285", "rs12530388", "rs688729", "rs2306866", "rs10071416", "rs1173461",
+  "rs11242536", "rs11242558", "rs55819809", "rs58982", "rs62368197", "rs72780043", "rs72780746", "rs4790874",
+  "rs114199486", "rs17384533", "rs56057935", "rs1381775", "rs6058869", "rs301184", "rs9841807", "rs113298055",
+  "rs12887138", "rs1381287", "rs1551540", "rs1555445", "rs79568594", "rs80188179", "rs1930371", "rs4877285",
+  "rs4798914", "rs635436", "rs71367544", "rs113013958", "rs2089737", "rs56400336", "rs9850597", "rs3115418",
+  "rs75358934", "rs9331343", "rs13045901", "rs6030775", "rs6073075", "rs10986732", "rs1759433", "rs10883733",
+  "rs11592299", "rs11593710", "rs61871134", "rs1008078", "rs12022460", "rs1022376", "rs7026534", "rs76608582",
+  "rs1022528", "rs35656245", "rs61966099", "rs76917951", "rs77878475", "rs9922607", "rs9941217", "rs12563365",
+  "rs7929518", "rs67050670", "rs80336848", "rs7920501", "rs4759229", "rs10272990", "rs1106396", "rs117159629",
+  "rs4425649", "rs4719278", "rs6948707", "rs11611651", "rs62137126", "rs1385108", "rs4885918", "rs4885943",
+  "rs61959481", "rs79734770", "rs7988208", "rs9569180", "rs11258417", "rs10892766", "rs12789949", "rs4936638",
+  "rs501840", "rs540860", "rs359431", "rs1518393", "rs72808453", "rs7024924", "rs1246265", "rs2378662",
+  "rs13066050", "rs329124", "rs4275621", "rs4947092", "rs116777343", "rs28690154", "rs9423279", "rs1935571",
+  "rs116870695", "rs17215180", "rs2675628", "rs77968426", "rs7921378", "rs10027777", "rs10939276", "rs55944129",
+  "rs56691107", "rs59537158", "rs61794092", "rs11734734", "rs7665009", "rs9884700", "rs3909281", "rs1910236",
+  "rs2734390", "rs3772468", "rs4727189", "rs7333559", "rs7338818", "rs238896", "rs73008357", "rs12918191",
+  "rs71592686", "rs6723832", "rs6731872", "rs72999685", "rs4476253", "rs1225407", "rs1934748", "rs4886207",
+  "rs55786907", "rs56367474", "rs9538424", "rs6829633", "rs12510065", "rs4374667", "rs71602617", "rs56208390",
+  "rs10042827", "rs149038548", "rs2022815", "rs10885480", "rs1885434", "rs10789369", "rs12144768", "rs1342686",
+  "rs2841192", "rs61765636", "rs61774465", "rs76858387", "rs34547896", "rs13412368", "rs1901477", "rs58211268",
+  "rs62149758", "rs6733337", "rs6746260", "rs73945982", "rs77304930", "rs79997320", "rs3934797", "rs62329977",
+  "rs11692625", "rs6750529", "rs62106258", "rs6437769", "rs440788", "rs143309544", "rs17554906", "rs1899800",
+  "rs9545155", "rs963354", "rs1449012", "rs6936160", "rs112725451", "rs115400938", "rs3891789", "rs4860804",
+  "rs41264285", "rs61246633", "rs10905461", "rs1778053", "rs2637869", "rs113230003", "rs1116690", "rs12474587",
+  "rs77732408", "rs10170496", "rs114524203", "rs114689808", "rs12476415", "rs12691710", "rs1427499", "rs274844",
+  "rs6727126", "rs6745169", "rs6756212", "rs72853300", "rs76096620", "rs16826827", "rs36068154", "rs61598942",
+  "rs76140896", "rs1927901", "rs2780244", "rs12908175", "rs1435672", "rs7657022", "rs11783093", "rs2640724"
+)
+
+# Drinks per Week: 202 unique RSIDs
+liu_drinks_per_week_lead <- c(
+  "rs117265605", "rs117859358", "rs139518433", "rs145832020", "rs182619800", "rs199451", "rs139598988", "rs7185555",
+  "rs74980679", "rs12361256", "rs56030824", "rs2854334", "rs13032049", "rs78784525", "rs62236533", "rs9607814",
+  "rs78876991", "rs828867", "rs28680958", "rs112519623", "rs13107325", "rs17249745", "rs9934579", "rs4548913",
+  "rs2180870", "rs34120326", "rs13094887", "rs10236149", "rs11030084", "rs6460047", "rs10068110", "rs4916723",
+  "rs142093325", "rs4524397", "rs7661627", "rs115030854", "rs11940694", "rs12152703", "rs151010045", "rs1973108",
+  "rs2687963", "rs4975018", "rs73238577", "rs76850498", "rs7692279", "rs56337305", "rs10516440", "rs10516441",
+  "rs114112910", "rs1229978", "rs1229982", "rs1229984", "rs283413", "rs3114045", "rs116525215", "rs116203444",
+  "rs1230148", "rs138423208", "rs29001570", "rs4147536", "rs10506274", "rs117655393", "rs3809627", "rs113443718",
+  "rs80273739", "rs1659684", "rs13408504", "rs111242383", "rs116361102", "rs11895367", "rs1260326", "rs1275505",
+  "rs1881396", "rs62140396", "rs7596471", "rs77535061", "rs9838144", "rs823114", "rs378421", "rs4787453",
+  "rs4455428", "rs4331083", "rs7950166", "rs3809162", "rs1123285", "rs3748034", "rs113371437", "rs500321",
+  "rs111874202", "rs17533020", "rs181163639", "rs2584448", "rs284784", "rs284796", "rs80329335", "rs3803800",
+  "rs11692435", "rs56786766", "rs78783493", "rs6787172", "rs12950295", "rs3744263", "rs115095779", "rs4501255",
+  "rs12651313", "rs17177078", "rs114040757", "rs11920096", "rs13078624", "rs138997413", "rs3887151", "rs62250685",
+  "rs7616022", "rs76363701", "rs6951475", "rs6951574", "rs116291148", "rs11075924", "rs79616692", "rs58107686",
+  "rs4092465", "rs17542254", "rs75120545", "rs12655091", "rs78119163", "rs5024204", "rs10438820", "rs10978550",
+  "rs55932213", "rs57828851", "rs2424645", "rs4815364", "rs73095987", "rs1217091", "rs2356371", "rs16846938",
+  "rs6675528", "rs295301", "rs35921581", "rs60654199", "rs10871641", "rs77452859", "rs9950000", "rs11739827",
+  "rs10750025", "rs35023999", "rs7112715", "rs73004016", "rs7940164", "rs13066454", "rs28601761", "rs2472297",
+  "rs1104608", "rs2639326", "rs13383034", "rs28607554", "rs72794053", "rs116122817", "rs10085696", "rs2851485",
+  "rs112047170", "rs13429233", "rs58836733", "rs72859280", "rs72998792", "rs2141284", "rs35966034", "rs71612659",
+  "rs7684429", "rs7685402", "rs7074871", "rs281379", "rs11625650", "rs750062", "rs17665139", "rs10876188",
+  "rs35034355", "rs2764771", "rs59367532", "rs62044525", "rs76407148", "rs12088813", "rs705687", "rs682011",
+  "rs55872084", "rs77165542", "rs4938230", "rs10753661", "rs1583317", "rs2548957", "rs35650232", "rs4690727",
+  "rs397074", "rs4842786", "rs10004020", "rs12907323", "rs28929474", "rs12795042", "rs11894012", "rs13024996",
+  "rs6741687", "rs13250583"
+)
+```
+
+```{r}
+# Liu: subset to phenotype-specific lead SNPs and reconstruct SEs
+
+data_dir <- "/Users/nico/work/sud/liu_lifted_harmonized"
+
+ku_sug_thresh <- 1e-5
+
+files <- list.files(
+  path = data_dir,
+  pattern = "^(ku|kuf)_.+_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+cat("Number of files found:", length(files), "\n")
+print(basename(files))
+
+
+# Store prepared lead-SNP datasets for the plotting cell
+liu_lead_data <- list()
+
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+
+  # Identify KU/KUF beta and p-value columns
+  x_beta <- grep(
+    "^beta_ku$|^beta_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+  x_p <- grep(
+    "^p_ku$|^p_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+
+  # Identify the aligned Liu beta column
+  y_beta <- grep(
+    "_to_khat_A1$",
+    names(dat),
+    value = TRUE
+  )
+
+
+  # Identify the Liu p-value column.
+  #
+  # First prefer an exact column named P.
+  # Otherwise search for a non-KU/KUF p-value column.
+  if ("P" %in% names(dat)) {
+
+    y_p <- "P"
+
+  } else {
+
+    y_p_candidates <- grep(
+      "^p$|pval|p_value|pvalue",
+      names(dat),
+      value = TRUE,
+      ignore.case = TRUE
+    )
+
+    y_p_candidates <- setdiff(
+      y_p_candidates,
+      x_p
+    )
+
+    if (length(y_p_candidates) == 1) {
+
+      y_p <- y_p_candidates
+
+    } else {
+
+      y_p <- character(0)
+    }
+  }
+
+
+  # Look for an original Liu SE column
+  y_se_candidates <- grep(
+    "^SE$|^se$|stderr|std_err|standard_error",
+    names(dat),
+    value = TRUE,
+    ignore.case = TRUE
+  )
+
+  y_se_candidates <- y_se_candidates[
+    !grepl(
+      "ku|kuf|khat",
+      y_se_candidates,
+      ignore.case = TRUE
+    )
+  ]
+
+
+  cat("x_beta:", paste(x_beta, collapse = ", "), "\n")
+  cat("x_p:", paste(x_p, collapse = ", "), "\n")
+  cat("y_beta:", paste(y_beta, collapse = ", "), "\n")
+  cat("y_p:", paste(y_p, collapse = ", "), "\n")
+  cat(
+    "Liu SE candidates:",
+    paste(y_se_candidates, collapse = ", "),
+    "\n"
+  )
+
+
+  if (
+    length(x_beta) != 1 ||
+      length(x_p) != 1 ||
+      length(y_beta) != 1 ||
+      !("khat_marker" %in% names(dat))
+  ) {
+
+    cat(
+      "Skipping because required beta, p-value, or marker columns were not identified.\n"
+    )
+
+    print(names(dat))
+    next
+  }
+
+
+  # Get filename without extension
+  pair_name <- tools::file_path_sans_ext(
+    basename(file)
+  )
+
+
+  # Remove ku_/kuf_ prefix and _harmonized suffix
+  phenotype_name <- sub(
+    "^(ku|kuf)_",
+    "",
+    pair_name
+  )
+
+  phenotype_name <- sub(
+    "_harmonized$",
+    "",
+    phenotype_name
+  )
+
+
+  # Select phenotype-specific lead SNPs and labels
+  if (phenotype_name == "AgeofInitiation") {
+
+    liu_lead <- liu_age_of_initiation_lead
+    liu_trait <- "Age of Initiation"
+    liu_n <- "262,990"
+
+  } else if (phenotype_name == "CigarettesPerDay") {
+
+    liu_lead <- liu_cigarettes_per_day_lead
+    liu_trait <- "Cigarettes per Day"
+    liu_n <- "263,954"
+
+  } else if (phenotype_name == "DrinksPerWeek") {
+
+    liu_lead <- liu_drinks_per_week_lead
+    liu_trait <- "Drinks per Week"
+    liu_n <- "537,349"
+
+  } else if (phenotype_name == "SmokingCessation") {
+
+    liu_lead <- liu_smoking_cessation_lead
+    liu_trait <- "Smoking Cessation"
+    liu_n <- "312,821"
+
+  } else if (phenotype_name == "SmokingInitiation") {
+
+    liu_lead <- liu_smoking_initiation_lead
+    liu_trait <- "Smoking Initiation"
+    liu_n <- "632,802"
+
+  } else {
+
+    cat(
+      "Skipping unrecognized phenotype:",
+      phenotype_name,
+      "\n"
+    )
+
+    next
+  }
+
+
+  cat("Liu phenotype:", liu_trait, "\n")
+  cat("Requested lead SNPs:", length(liu_lead), "\n")
+
+
+  # Identify the comparison-study marker column
+  comparison_marker_candidates <- grep(
+    "marker$|^SNP$|^rsid$|^RSID$",
+    names(dat),
+    value = TRUE,
+    ignore.case = TRUE
+  )
+
+  comparison_marker_candidates <- setdiff(
+    comparison_marker_candidates,
+    "khat_marker"
+  )
+
+  if (length(comparison_marker_candidates) >= 1) {
+
+    comparison_marker <- comparison_marker_candidates[1]
+
+    cat(
+      "Liu marker column:",
+      comparison_marker,
+      "\n"
+    )
+
+  } else {
+
+    comparison_marker <- NULL
+
+    cat(
+      "No separate Liu marker column detected; ",
+      "using khat_marker only.\n",
+      sep = ""
+    )
+  }
+
+
+  # Keep only phenotype-specific Liu lead SNPs
+  if (!is.null(comparison_marker)) {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% liu_lead |
+        dat[[comparison_marker]] %in% liu_lead,
+      ,
+      drop = FALSE
+    ]
+
+  } else {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% liu_lead,
+      ,
+      drop = FALSE
+    ]
+  }
+
+
+  cat("Lead SNP rows found:", nrow(dat_lead), "\n")
+
+
+  # Determine which requested lead SNPs were found
+  found_leads <- dat_lead$khat_marker[
+    dat_lead$khat_marker %in% liu_lead
+  ]
+
+  if (!is.null(comparison_marker)) {
+
+    found_leads <- c(
+      found_leads,
+      dat_lead[[comparison_marker]][
+        dat_lead[[comparison_marker]] %in% liu_lead
+      ]
+    )
+  }
+
+  found_leads <- unique(
+    found_leads[
+      !is.na(found_leads) &
+        found_leads != ""
+    ]
+  )
+
+  missing_leads <- setdiff(
+    liu_lead,
+    found_leads
+  )
+
+  cat(
+    "Unique lead SNPs found:",
+    length(found_leads),
+    "\n"
+  )
+
+  cat(
+    "Lead SNPs missing:",
+    length(missing_leads),
+    "\n"
+  )
+
+
+  if (nrow(dat_lead) == 0) {
+
+    cat(
+      "No requested Liu lead SNPs were found; skipping.\n"
+    )
+
+    next
+  }
+
+
+  # Convert beta and p-value columns to numeric
+  dat_lead[[x_beta]] <- as.numeric(
+    dat_lead[[x_beta]]
+  )
+
+  dat_lead[[x_p]] <- as.numeric(
+    dat_lead[[x_p]]
+  )
+
+  dat_lead[[y_beta]] <- as.numeric(
+    dat_lead[[y_beta]]
+  )
+
+
+  # Reconstruct signed KU/KUF Z-scores and standard errors
+
+  # Z  = sign(beta) * |Phi^(-1)(p / 2)|
+  # SE = beta / Z
+  dat_lead$z_khat <- ifelse(
+    !is.na(dat_lead[[x_beta]]) &
+      is.finite(dat_lead[[x_beta]]) &
+      !is.na(dat_lead[[x_p]]) &
+      is.finite(dat_lead[[x_p]]) &
+      dat_lead[[x_p]] > 0 &
+      dat_lead[[x_p]] < 1 &
+      dat_lead[[x_beta]] != 0,
+
+    sign(dat_lead[[x_beta]]) *
+      abs(qnorm(dat_lead[[x_p]] / 2)),
+
+    NA_real_
+  )
+
+
+  dat_lead$se_khat <- ifelse(
+    !is.na(dat_lead$z_khat) &
+      is.finite(dat_lead$z_khat) &
+      dat_lead$z_khat != 0,
+
+    dat_lead[[x_beta]] /
+      dat_lead$z_khat,
+
+    NA_real_
+  )
+
+
+  # Obtain Liu standard errors
+
+  if (length(y_se_candidates) == 1) {
+
+    # Use an original Liu SE column when one is available
+    y_se <- y_se_candidates[1]
+
+    dat_lead[[y_se]] <- as.numeric(
+      dat_lead[[y_se]]
+    )
+
+    dat_lead$se_liu <- abs(
+      dat_lead[[y_se]]
+    )
+
+    liu_se_source <- paste0(
+      "reported SE column: ",
+      y_se
+    )
+
+  } else if (length(y_p) == 1) {
+
+    # Otherwise reconstruct Liu SE from beta and p-value
+    dat_lead[[y_p]] <- as.numeric(
+      dat_lead[[y_p]]
+    )
+
+    dat_lead$z_liu <- ifelse(
+      !is.na(dat_lead[[y_beta]]) &
+        is.finite(dat_lead[[y_beta]]) &
+        !is.na(dat_lead[[y_p]]) &
+        is.finite(dat_lead[[y_p]]) &
+        dat_lead[[y_p]] > 0 &
+        dat_lead[[y_p]] < 1 &
+        dat_lead[[y_beta]] != 0,
+
+      sign(dat_lead[[y_beta]]) *
+        abs(qnorm(dat_lead[[y_p]] / 2)),
+
+      NA_real_
+    )
+
+    dat_lead$se_liu <- ifelse(
+      !is.na(dat_lead$z_liu) &
+        is.finite(dat_lead$z_liu) &
+        dat_lead$z_liu != 0,
+
+      dat_lead[[y_beta]] /
+        dat_lead$z_liu,
+
+      NA_real_
+    )
+
+    liu_se_source <- paste0(
+      "reconstructed from p-value column: ",
+      y_p
+    )
+
+  } else {
+
+    dat_lead$se_liu <- NA_real_
+    liu_se_source <- "unavailable"
+  }
+
+
+  cat(
+    "Liu SE source:",
+    liu_se_source,
+    "\n"
+  )
+
+
+  # Store information required by the plotting cell
+  attr(dat_lead, "x_beta") <- x_beta
+  attr(dat_lead, "x_p") <- x_p
+  attr(dat_lead, "y_beta") <- y_beta
+  attr(dat_lead, "y_p") <- if (
+    length(y_p) == 1
+  ) {
+    y_p
+  } else {
+    NULL
+  }
+
+  attr(dat_lead, "comparison_marker") <-
+    comparison_marker
+
+  attr(dat_lead, "liu_trait") <- liu_trait
+  attr(dat_lead, "liu_n") <- liu_n
+  attr(dat_lead, "phenotype_name") <-
+    phenotype_name
+
+  attr(dat_lead, "liu_se_source") <-
+    liu_se_source
+
+
+  # Save this phenotype pair to the list
+  liu_lead_data[[pair_name]] <- dat_lead
+
+
+  cat(
+    "Rows with usable KU/KUF SE:",
+    sum(
+      is.finite(dat_lead$se_khat),
+      na.rm = TRUE
+    ),
+    "\n"
+  )
+
+  cat(
+    "Rows with usable Liu SE:",
+    sum(
+      is.finite(dat_lead$se_liu),
+      na.rm = TRUE
+    ),
+    "\n"
+  )
+}
+
+
+cat(
+  "\nNumber of datasets prepared:",
+  length(liu_lead_data),
+  "\n"
+)
+
+print(
+  names(liu_lead_data)
+)
+
+
+# Show the number of lead-SNP rows in each dataset
+if (length(liu_lead_data) > 0) {
+
+  print(
+    sapply(
+      liu_lead_data,
+      nrow
+    )
+  )
+}
+```
+
+
+```{r}
+# Liu: lead SNP beta comparison plots with 95% confidence intervals
+
+# Horizontal error bars:
+#   KU/KUF 95% confidence intervals
+
+# Vertical error bars:
+#   Liu 95% confidence intervals
+
+cat(
+  "Number of Liu datasets to plot:",
+  length(liu_lead_data),
+  "\n"
+)
+
+
+if (length(liu_lead_data) == 0) {
+
+  stop(
+    paste0(
+      "liu_lead_data is empty. ",
+      "Run the preceding preparation cell and inspect its messages."
+    )
+  )
+}
+
+
+for (pair_name in names(liu_lead_data)) {
+
+  cat("\nPlotting:", pair_name, "\n")
+
+  plot_dat <- liu_lead_data[[pair_name]]
+
+
+  # Retrieve information stored in Cell 1
+  x_beta <- attr(
+    plot_dat,
+    "x_beta"
+  )
+
+  x_p <- attr(
+    plot_dat,
+    "x_p"
+  )
+
+  y_beta <- attr(
+    plot_dat,
+    "y_beta"
+  )
+
+  comparison_marker <- attr(
+    plot_dat,
+    "comparison_marker"
+  )
+
+  liu_trait <- attr(
+    plot_dat,
+    "liu_trait"
+  )
+
+  liu_n <- attr(
+    plot_dat,
+    "liu_n"
+  )
+
+  liu_se_source <- attr(
+    plot_dat,
+    "liu_se_source"
+  )
+
+
+  # KU versus KUF labels
+  if (grepl("^ku_", pair_name)) {
+
+    khat_trait <- "Khat Use"
+    khat_n_label <- "KU N = 33,210"
+
+  } else {
+
+    khat_trait <- "Khat Use Frequency"
+    khat_n_label <- "KUF N = 25,869"
+  }
+
+
+  liu_n_label <- paste0(
+    liu_trait,
+    " N = ",
+    liu_n
+  )
+
+
+  # Keep rows with complete beta and SE values
+  plot_dat <- plot_dat[
+    !is.na(plot_dat[[x_beta]]) &
+      !is.na(plot_dat[[y_beta]]) &
+      !is.na(plot_dat$se_khat) &
+      !is.na(plot_dat$se_liu) &
+      is.finite(plot_dat$se_khat) &
+      is.finite(plot_dat$se_liu) &
+      plot_dat$se_khat >= 0 &
+      plot_dat$se_liu >= 0,
+    ,
+    drop = FALSE
+  ]
+
+
+  cat(
+    "Rows remaining after beta/SE filtering:",
+    nrow(plot_dat),
+    "\n"
+  )
+
+
+  if (nrow(plot_dat) == 0) {
+
+    cat(
+      "Skipping plot because no lead SNPs have complete beta and SE values.\n"
+    )
+
+    next
+  }
+
+
+  # Orient the KU/KUF beta positively.
+  #
+  # Both aligned beta estimates are flipped together.
+  # Standard errors remain unchanged.
+  flip_rows <- plot_dat[[x_beta]] < 0
+
+  cat(
+    "Lead SNP rows flipped:",
+    sum(flip_rows),
+    "\n"
+  )
+
+  plot_dat[[x_beta]][flip_rows] <-
+    -plot_dat[[x_beta]][flip_rows]
+
+  plot_dat[[y_beta]][flip_rows] <-
+    -plot_dat[[y_beta]][flip_rows]
+
+
+  # Calculate 95% confidence intervals
+  plot_dat$x_ci_lower <-
+    plot_dat[[x_beta]] -
+    1.96 * plot_dat$se_khat
+
+  plot_dat$x_ci_upper <-
+    plot_dat[[x_beta]] +
+    1.96 * plot_dat$se_khat
+
+  plot_dat$y_ci_lower <-
+    plot_dat[[y_beta]] -
+    1.96 * plot_dat$se_liu
+
+  plot_dat$y_ci_upper <-
+    plot_dat[[y_beta]] +
+    1.96 * plot_dat$se_liu
+
+
+  # Highlight SNPs with KU/KUF p < 1e-5
+  plot_dat$highlight <-
+    !is.na(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < ku_sug_thresh
+
+
+  cat(
+    "Complete lead SNP rows plotted:",
+    nrow(plot_dat),
+    "\n"
+  )
+
+  cat(
+    "Lead SNPs highlighted at KU/KUF P < ",
+    ku_sug_thresh,
+    ": ",
+    sum(plot_dat$highlight),
+    "\n",
+    sep = ""
+  )
+
+
+  # Create plotting marker labels
+  if (
+    !is.null(comparison_marker) &&
+      comparison_marker %in% names(plot_dat)
+  ) {
+
+    plot_dat$plot_marker <- ifelse(
+      !is.na(plot_dat[[comparison_marker]]) &
+        plot_dat[[comparison_marker]] != "",
+      plot_dat[[comparison_marker]],
+      plot_dat$khat_marker
+    )
+
+  } else {
+
+    plot_dat$plot_marker <-
+      plot_dat$khat_marker
+  }
+
+
+
+  # Count plotted variants with nominal KU/KUF association (P < 0.05)
+  khat_p05_count <- sum(
+    !is.na(plot_dat[[x_p]]) &
+      is.finite(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < 0.05
+  )
+
+  cat(
+    khat_trait,
+    " variants with P < 0.05:",
+    khat_p05_count,
+    "\n"
+  )
+
+  # Pearson correlation
+  if (
+    nrow(plot_dat) >= 3 &&
+      length(
+        unique(plot_dat[[x_beta]])
+      ) >= 2 &&
+      length(
+        unique(plot_dat[[y_beta]])
+      ) >= 2
+  ) {
+
+    pearson_test <- cor.test(
+      plot_dat[[x_beta]],
+      plot_dat[[y_beta]],
+      method = "pearson"
+    )
+
+    pearson_r <- unname(
+      pearson_test$estimate
+    )
+
+    pearson_p <- pearson_test$p.value
+
+    title_correlation <- paste0(
+      " | r = ",
+      round(
+        pearson_r,
+        4
+      )
+    )
+
+    correlation_label <- paste0(
+      "Pearson p = ",
+      format.pval(
+        pearson_p,
+        digits = 3,
+        eps = 1e-300
+      )
+    )
+
+  } else {
+
+    title_correlation <- ""
+
+    correlation_label <- paste0(
+      "Pearson correlation not calculated; ",
+      nrow(plot_dat),
+      " complete lead SNP",
+      ifelse(
+        nrow(plot_dat) == 1,
+        "",
+        "s"
+      ),
+      " available"
+    )
+  }
+
+
+  # Create plot
+  # Generalized Deming regression
+  deming_results <- get_deming_results(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_se = "se_khat",
+    y_se = "se_liu"
+  )
+
+  add_comparison_summary(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_p = x_p,
+    khat_trait = khat_trait,
+    comparison_label = paste0("Liu ", liu_trait),
+    deming_results = deming_results
+  )
+
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+
+    # Horizontal KU/KUF 95% confidence intervals
+    geom_errorbar(
+      aes(
+        xmin = x_ci_lower,
+        xmax = x_ci_upper
+      ),
+      orientation = "y",
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Vertical Liu 95% confidence intervals
+    geom_errorbar(
+      aes(
+        ymin = y_ci_lower,
+        ymax = y_ci_upper
+      ),
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Plot all available phenotype-specific lead SNPs
+    geom_point(
+      alpha = 0.6,
+      size = 3
+    ) +
+
+    # Ordinary least-squares line of best fit
+    {
+      if (
+        nrow(plot_dat) >= 2 &&
+          length(unique(plot_dat[[x_beta]])) >= 2
+      ) {
+
+        geom_smooth(
+          method = "lm",
+          formula = y ~ x,
+          se = FALSE,
+          color = "blue",
+          linetype = "dashed",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Generalized Deming regression line
+    {
+      if (
+        is.finite(deming_results$intercept) &&
+          is.finite(deming_results$slope)
+      ) {
+
+        geom_abline(
+          intercept = deming_results$intercept,
+          slope = deming_results$slope,
+          color = "blue",
+          linetype = "solid",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Highlight SNPs with KU/KUF p < 1e-5
+    geom_point(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      color = "red",
+      size = 3.5
+    ) +
+
+    # Label highlighted SNPs
+    geom_text_repel(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      aes(
+        label = plot_marker
+      ),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+
+    geom_hline(
+      yintercept = 0
+    ) +
+
+    geom_vline(
+      xintercept = 0
+    ) +
+
+    theme_bw() +
+
+    theme(
+      plot.title = element_text(
+        size = 11
+      ),
+      plot.subtitle = element_text(
+        size = 6
+      )
+    ) +
+
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x Liu: ",
+        liu_trait,
+        " Lead SNPs",
+        title_correlation
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        liu_n_label,
+        " | Lead SNPs plotted = ",
+        nrow(plot_dat),
+        " | Error bars = 95% CIs",
+        " | ",
+        deming_results$label,
+        " | ",
+        correlation_label
+      ),
+      x = paste0(
+        khat_trait,
+        " beta"
+      ),
+      y = paste0(
+        liu_trait,
+        " beta"
+      )
+    )
+
+  print(p)
+}
+```
+
+```{r}
+# Liu: Smoking Initiation lead SNP plots only
+
+# Plot only Smoking Initiation lead SNPs with KU/KUF P < 0.05.
+
+# Horizontal error bars:
+#   KU/KUF 95% confidence intervals
+
+# Vertical error bars:
+#   Liu Smoking Initiation 95% confidence intervals
+
+# Red points:
+#   KU/KUF P < 1e-5
+
+
+
+
+# Select only the KU and KUF Smoking Initiation datasets
+smkinit_names <- names(liu_lead_data)[
+  grepl(
+    "SmokingInitiation",
+    names(liu_lead_data),
+    fixed = TRUE
+  )
+]
+
+
+cat(
+  "Smoking Initiation datasets found:",
+  length(smkinit_names),
+  "\n"
+)
+
+print(smkinit_names)
+
+
+if (length(smkinit_names) == 0) {
+
+  stop(
+    paste0(
+      "No Smoking Initiation datasets were found in liu_lead_data. ",
+      "Expected names containing 'SmokingInitiation'."
+    )
+  )
+}
+
+
+for (pair_name in smkinit_names) {
+
+  cat("\nPlotting:", pair_name, "\n")
+
+  plot_dat <- liu_lead_data[[pair_name]]
+
+
+  # Retrieve stored column names and labels
+  x_beta <- attr(
+    plot_dat,
+    "x_beta"
+  )
+
+  x_p <- attr(
+    plot_dat,
+    "x_p"
+  )
+
+  y_beta <- attr(
+    plot_dat,
+    "y_beta"
+  )
+
+  comparison_marker <- attr(
+    plot_dat,
+    "comparison_marker"
+  )
+
+  liu_trait <- attr(
+    plot_dat,
+    "liu_trait"
+  )
+
+  liu_n <- attr(
+    plot_dat,
+    "liu_n"
+  )
+
+  liu_se_source <- attr(
+    plot_dat,
+    "liu_se_source"
+  )
+
+
+  # Fallback labels in case attributes are absent
+  if (
+    is.null(liu_trait) ||
+      length(liu_trait) == 0
+  ) {
+
+    liu_trait <- "Smoking Initiation"
+  }
+
+  if (
+    is.null(liu_n) ||
+      length(liu_n) == 0
+  ) {
+
+    liu_n <- "632,802"
+  }
+
+
+  # Identify KU versus KUF
+  if (grepl("^ku_", pair_name)) {
+
+    khat_trait <- "Khat Use"
+    khat_n_label <- "KU N = 33,210"
+
+  } else {
+
+    khat_trait <- "Khat Use Frequency"
+    khat_n_label <- "KUF N = 25,869"
+  }
+
+
+  liu_n_label <- paste0(
+    "Smoking Initiation N = ",
+    liu_n
+  )
+
+
+  # Keep only rows with:
+  #   1. complete beta estimates
+  #   2. complete SE estimates
+  #   3. a valid KU/KUF p-value
+  #   4. KU/KUF P < 0.05
+  plot_dat <- plot_dat[
+    !is.na(plot_dat[[x_beta]]) &
+      !is.na(plot_dat[[y_beta]]) &
+      !is.na(plot_dat[[x_p]]) &
+      !is.na(plot_dat$se_khat) &
+      !is.na(plot_dat$se_liu) &
+      is.finite(plot_dat[[x_beta]]) &
+      is.finite(plot_dat[[y_beta]]) &
+      is.finite(plot_dat[[x_p]]) &
+      is.finite(plot_dat$se_khat) &
+      is.finite(plot_dat$se_liu) &
+      plot_dat[[x_p]] > 0 &
+      plot_dat[[x_p]] < 0.05 &
+      plot_dat$se_khat >= 0 &
+      plot_dat$se_liu >= 0,
+    ,
+    drop = FALSE
+  ]
+
+
+  cat(
+    "Smoking Initiation lead SNPs with KU/KUF P < 0.05:",
+    nrow(plot_dat),
+    "\n"
+  )
+
+
+  if (nrow(plot_dat) == 0) {
+
+    cat(
+      "Skipping because no complete Smoking Initiation ",
+      "lead SNPs had KU/KUF P < 0.05.\n",
+      sep = ""
+    )
+
+    next
+  }
+
+
+  # Orient KU/KUF beta positively.
+  #
+  # Flip both aligned beta estimates together.
+  # Standard errors remain unchanged.
+  flip_rows <- plot_dat[[x_beta]] < 0
+
+  cat(
+    "Lead SNP rows flipped:",
+    sum(flip_rows),
+    "\n"
+  )
+
+  plot_dat[[x_beta]][flip_rows] <-
+    -plot_dat[[x_beta]][flip_rows]
+
+  plot_dat[[y_beta]][flip_rows] <-
+    -plot_dat[[y_beta]][flip_rows]
+
+
+  # Calculate 95% confidence intervals
+  plot_dat$x_ci_lower <-
+    plot_dat[[x_beta]] -
+    1.96 * plot_dat$se_khat
+
+  plot_dat$x_ci_upper <-
+    plot_dat[[x_beta]] +
+    1.96 * plot_dat$se_khat
+
+  plot_dat$y_ci_lower <-
+    plot_dat[[y_beta]] -
+    1.96 * plot_dat$se_liu
+
+  plot_dat$y_ci_upper <-
+    plot_dat[[y_beta]] +
+    1.96 * plot_dat$se_liu
+
+
+  # Highlight KU/KUF P < 1e-5
+  plot_dat$highlight <-
+    plot_dat[[x_p]] < ku_sug_thresh
+
+
+  cat(
+    "Lead SNPs highlighted at KU/KUF P < ",
+    ku_sug_thresh,
+    ": ",
+    sum(plot_dat$highlight),
+    "\n",
+    sep = ""
+  )
+
+
+  # Create marker labels
+  if (
+    !is.null(comparison_marker) &&
+      comparison_marker %in% names(plot_dat)
+  ) {
+
+    plot_dat$plot_marker <- ifelse(
+      !is.na(plot_dat[[comparison_marker]]) &
+        plot_dat[[comparison_marker]] != "",
+      plot_dat[[comparison_marker]],
+      plot_dat$khat_marker
+    )
+
+  } else {
+
+    plot_dat$plot_marker <-
+      plot_dat$khat_marker
+  }
+
+
+
+  # Count plotted variants with nominal KU/KUF association (P < 0.05)
+  khat_p05_count <- sum(
+    !is.na(plot_dat[[x_p]]) &
+      is.finite(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < 0.05
+  )
+
+  cat(
+    khat_trait,
+    " variants with P < 0.05:",
+    khat_p05_count,
+    "\n"
+  )
+
+  # Pearson correlation among the plotted SNPs only
+  if (
+    nrow(plot_dat) >= 3 &&
+      length(unique(plot_dat[[x_beta]])) >= 2 &&
+      length(unique(plot_dat[[y_beta]])) >= 2
+  ) {
+
+    pearson_test <- cor.test(
+      plot_dat[[x_beta]],
+      plot_dat[[y_beta]],
+      method = "pearson"
+    )
+
+    pearson_r <- unname(
+      pearson_test$estimate
+    )
+
+    pearson_p <- pearson_test$p.value
+
+    title_correlation <- paste0(
+      " | r = ",
+      round(
+        pearson_r,
+        4
+      )
+    )
+
+    correlation_label <- paste0(
+      "Pearson p = ",
+      format.pval(
+        pearson_p,
+        digits = 3,
+        eps = 1e-300
+      )
+    )
+
+  } else {
+
+    title_correlation <- ""
+
+    correlation_label <- paste0(
+      "Pearson correlation not calculated; ",
+      nrow(plot_dat),
+      " complete lead SNP",
+      ifelse(
+        nrow(plot_dat) == 1,
+        "",
+        "s"
+      ),
+      " available"
+    )
+  }
+
+
+  # Create plot
+  # Generalized Deming regression
+  deming_results <- get_deming_results(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_se = "se_khat",
+    y_se = "se_liu"
+  )
+
+  # Do not add this P < 0.05-only visualization to comparison_summary.
+  # The complete Liu Smoking Initiation comparison is already added in the
+  # preceding all-Liu plotting cell, before applying the nominal P < 0.05 filter.
+  # This keeps the summary-table denominator equal to all usable comparison SNPs
+  # and lets the final column report how many of those have KU/KUF P < 0.05.
+
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+
+    # Horizontal KU/KUF 95% confidence intervals
+    geom_errorbar(
+      aes(
+        xmin = x_ci_lower,
+        xmax = x_ci_upper
+      ),
+      orientation = "y",
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Vertical Liu 95% confidence intervals
+    geom_errorbar(
+      aes(
+        ymin = y_ci_lower,
+        ymax = y_ci_upper
+      ),
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Plot Smoking Initiation lead SNPs
+    geom_point(
+      alpha = 0.6,
+      size = 3
+    ) +
+
+    # Ordinary least-squares line of best fit
+    {
+      if (
+        nrow(plot_dat) >= 2 &&
+          length(unique(plot_dat[[x_beta]])) >= 2
+      ) {
+
+        geom_smooth(
+          method = "lm",
+          formula = y ~ x,
+          se = FALSE,
+          color = "blue",
+          linetype = "dashed",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Generalized Deming regression line
+    {
+      if (
+        is.finite(deming_results$intercept) &&
+          is.finite(deming_results$slope)
+      ) {
+
+        geom_abline(
+          intercept = deming_results$intercept,
+          slope = deming_results$slope,
+          color = "blue",
+          linetype = "solid",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Highlight SNPs with KU/KUF P < 1e-5
+    geom_point(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      color = "red",
+      size = 3.5
+    ) +
+
+    # Label only highlighted SNPs
+    geom_text_repel(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      aes(
+        label = plot_marker
+      ),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+
+    geom_hline(
+      yintercept = 0
+    ) +
+
+    geom_vline(
+      xintercept = 0
+    ) +
+
+    theme_bw() +
+
+    theme(
+      plot.title = element_text(
+        size = 9
+      ),
+      plot.subtitle = element_text(
+        size = 6
+      )
+    ) +
+
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x Liu: Smoking Initiation Lead SNPs",
+        " with KU/KUF P < 0.05",
+        title_correlation
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        liu_n_label,
+        " | Lead SNPs plotted = ",
+        nrow(plot_dat),
+        " | Error bars = 95% CIs",
+        " | ",
+        deming_results$label,
+        " | ",
+        correlation_label
+      ),
+      x = paste0(
+        khat_trait,
+        " beta"
+      ),
+      y = "Smoking Initiation beta"
+)
+  print(p)
+}
+  
+```
+
+
+
+```{r}
+# Lead vars for GSCAN: Saunders
+# Please refer to here for rsID list: 
+# https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-022-05477-4/MediaObjects/41586_2022_5477_MOESM3_ESM.xlsx
+# ST2 Meta-Analysis Results is has rsID for each phenotype-super population pairing
+# p<5*10e-9
+
+# SmkInit EUR: 1752 RSIDs
+saunders_smkinit_eur_lead <- c(
+  "rs61759161", "rs7529548", "rs2693959", "rs12120887", "rs301807", "rs7547198", "rs4291495", "rs78116078",
+  "rs3820277", "rs12125335", "rs9426771", "rs158760", "rs6424145", "rs6703730", "rs56147926", "rs9426294",
+  "rs1188426", "rs2228552", "rs877674", "rs1284371", "rs71792307", "rs55745410", "rs548133161", "rs60186947",
+  "rs2637869", "rs260975", "rs579448", "rs12755632", "rs58829390", "rs951740", "rs11210892", "rs2367724",
+  "rs147154109", "rs489319", "rs7531165", "rs7520050", "rs1317949", "rs241464", "rs56184305", "rs1467726",
+  "rs11587399", "rs11587148", "rs197602", "rs4912248", "rs12752905", "rs587204", "rs1462935", "rs437021",
+  "rs11208750", "rs3009872", "rs3795530", "rs10889739", "rs61771539", "rs35345355", "rs10595283", "rs61767418",
+  "rs12120214", "rs12127629", "rs67958905", "rs6673919", "rs56073047", "rs35291719", "rs1923238", "rs1514175",
+  "rs11162988", "rs962249", "rs55808855", "rs6676269", "rs12088221", "rs11163840", "rs12042237", "rs12042107",
+  "rs1526480", "rs10922972", "rs11165395", "rs1960043", "rs1222069", "rs587242", "rs28552810", "rs78542688",
+  "rs61784651", "rs6668631", "rs3768480", "rs517680", "rs10857936", "rs3790598", "rs112936545", "rs4839518",
+  "rs2767318", "rs11580960", "rs10888432", "rs12023901", "rs1194589", "rs3738029", "rs45444697", "rs1750308",
+  "rs991841", "rs2275558", "rs116089225", "rs12047487", "rs6701033", "rs2901785", "rs12076453", "rs2076340",
+  "rs1819339", "rs543874", "rs147052174", "rs199917", "rs12122217", "rs10912306", "rs4233132", "rs61818095",
+  "rs10737631", "rs4282851", "rs5779967", "rs2821307", "rs11801229", "rs11240351", "rs823097", "rs2808454",
+  "rs10863714", "rs7555036", "rs55921136", "rs12239420", "rs10863958", "rs12116805", "rs55760458", "rs616523",
+  "rs2047429", "rs11590766", "rs72747401", "rs12125241", "rs2175789", "rs12405317", "rs6687568", "rs7340000",
+  "rs10802900", "rs12046163", "rs2111735", "rs34967813", "rs7523793", "rs10926783", "rs12034588", "rs7545078",
+  "rs61834348", "rs17713879", "rs62106258", "rs7563362", "rs939583", "rs60383093", "rs6731872", "rs4429506",
+  "rs6737433", "rs823174", "rs6730303", "rs403407", "rs4668555", "rs11674851", "rs1850839", "rs67446571",
+  "rs13033444", "rs11676272", "rs2710634", "rs10186483", "rs13023731", "rs112011213", "rs4952620", "rs11898602",
+  "rs9789345", "rs1439227", "rs4952694", "rs150106816", "rs111427001", "rs1004787", "rs89112", "rs483404",
+  "rs13035558", "rs34463891", "rs1921617", "rs11125278", "rs7598402", "rs10206907", "rs2193399", "rs9989877",
+  "rs6714450", "rs6721972", "rs13016665", "rs10490091", "rs12052206", "rs767012", "rs155571", "rs1863161",
+  "rs4671381", "rs7593702", "rs12618946", "rs10187013", "rs605980", "rs828867", "rs4853315", "rs7570001",
+  "rs934517", "rs6727872", "rs10179482", "rs11126820", "rs7587086", "rs62153530", "rs13024436", "rs11692435",
+  "rs12613547", "rs6720885", "rs13392222", "rs6722320", "rs200098652", "rs266067", "rs70948930", "rs266070",
+  "rs1093422", "rs150417565", "rs10716577", "rs34511175", "rs11690639", "rs67209022", "rs12712181", "rs62155874",
+  "rs3811038", "rs3860388", "rs1480496", "rs2551885", "rs78986663", "rs4076867", "rs36067003", "rs12616531",
+  "rs6541967", "rs34212842", "rs7595381", "rs2406818", "rs6705147", "rs146058444", "rs34399632", "rs1349159",
+  "rs4392318", "rs75420018", "rs4233567", "rs1427499", "rs66561720", "rs34617897", "rs6755330", "rs1533426",
+  "rs34890200", "rs6721116", "rs4662247", "rs16826827", "rs151017656", "rs17270051", "rs6723298", "rs35871736",
+  "rs35417060", "rs10205080", "rs2652448", "rs1524903", "rs12991004", "rs3771653", "rs10203954", "rs13393480",
+  "rs4414690", "rs17222172", "rs1267073", "rs2909449", "rs11288272", "rs2042069", "rs16848628", "rs357304",
+  "rs10930112", "rs7581427", "rs6743239", "rs4667627", "rs6738445", "rs75118902", "rs13009008", "rs11679840",
+  "rs9287966", "rs6433465", "rs12162360", "rs7567205", "rs17400325", "rs2217839", "rs1434085", "rs7424715",
+  "rs1918700", "rs1406338", "rs6434279", "rs62179730", "rs62181533", "rs6744374", "rs16825188", "rs7562655",
+  "rs4673339", "rs796363", "rs2107300", "rs62193861", "rs6735008", "rs72938351", "rs112490174", "rs10932177",
+  "rs16842895", "rs75119611", "rs7569918", "rs113770243", "rs11236", "rs746234", "rs113973910", "rs13010933",
+  "rs72967129", "rs10932927", "rs13003746", "rs7594223", "rs72537620", "rs908639", "rs12477972", "rs13398149",
+  "rs12465126", "rs68140214", "rs2117838", "rs11681247", "rs79245503", "rs11714993", "rs1312821", "rs1869243",
+  "rs6779167", "rs360892", "rs7629352", "rs1372072", "rs9759086", "rs4973708", "rs62238582", "rs7615602",
+  "rs7622320", "rs7622818", "rs6550942", "rs4858254", "rs259460", "rs4546101", "rs9874157", "rs4858708",
+  "rs1368262", "rs60609026", "rs9872650", "rs2371340", "rs35965474", "rs2336037", "rs13081686", "rs112912733",
+  "rs75507005", "rs7612822", "rs11716779", "rs3172494", "rs2526384", "rs2564947", "rs62256059", "rs3774608",
+  "rs73082000", "rs12491186", "rs17666667", "rs9868731", "rs12485388", "rs2734388", "rs4688131", "rs254856",
+  "rs103323", "rs11131004", "rs11720595", "rs1552628", "rs6787584", "rs2117760", "rs4676964", "rs62246017",
+  "rs116516927", "rs61279572", "rs2068484", "rs12494644", "rs7628131", "rs1376967", "rs9857160", "rs75964821",
+  "rs568187754", "rs11922956", "rs4856605", "rs9861443", "rs4857445", "rs7648780", "rs1610243", "rs9834091",
+  "rs9851055", "rs989305", "rs140272331", "rs16854357", "rs144953387", "rs2895349", "rs9851821", "rs13090443",
+  "rs1438356", "rs62266236", "rs817505", "rs1353910", "rs6765528", "rs812048", "rs332506", "rs7630666",
+  "rs62266877", "rs76268416", "rs1806441", "rs4955530", "rs12494120", "rs1499875", "rs6777420", "rs13075955",
+  "rs6775106", "rs1674584", "rs2279829", "rs2319545", "rs13066566", "rs2305855", "rs684889", "rs114050142",
+  "rs111497775", "rs701146", "rs1963395", "rs6784371", "rs4680399", "rs577584474", "rs62286625", "rs10574946",
+  "rs111066896", "rs1724679", "rs1375403", "rs1119974", "rs3041596", "rs11923944", "rs10936486", "rs72622542",
+  "rs4894519", "rs522028", "rs694786", "rs16828799", "rs7646954", "rs1843059", "rs13069244", "rs2718791",
+  "rs9839000", "rs186063", "rs368665", "rs4459932", "rs79408405", "rs17164088", "rs55927173", "rs73208983",
+  "rs28684570", "rs11727087", "rs1454882", "rs35631388", "rs2215810", "rs12503223", "rs71605366", "rs61789379",
+  "rs1870261", "rs1355808", "rs2932966", "rs210749", "rs12642744", "rs6829467", "rs292078", "rs10014069",
+  "rs9637592", "rs6841521", "rs16884402", "rs58400863", "rs10030328", "rs6811233", "rs1511865", "rs7681453",
+  "rs56739984", "rs3098914", "rs36153619", "rs13129317", "rs13136474", "rs1076016", "rs35912788", "rs2140147",
+  "rs62313045", "rs282742", "rs7439553", "rs925421", "rs4860386", "rs2611639", "rs6818012", "rs35499800",
+  "rs11394602", "rs1383722", "rs72636642", "rs4148275", "rs114841229", "rs2602116", "rs72886312", "rs11394074",
+  "rs1503212", "rs12503522", "rs7665151", "rs2865766", "rs112623404", "rs950882", "rs2074396", "rs72678864",
+  "rs72667319", "rs1351203", "rs7675389", "rs13110077", "rs6534338", "rs75880970", "rs9917941", "rs7683916",
+  "rs979640", "rs35541133", "rs6844991", "rs2405708", "rs7695285", "rs10026630", "rs28663547", "rs28612738",
+  "rs769657", "rs10641969", "rs55669488", "rs6537071", "rs1116690", "rs147576622", "rs115066095", "rs28497709",
+  "rs56317226", "rs56353882", "rs7668995", "rs77634900", "rs7674049", "rs6853197", "rs62334509", "rs1491617",
+  "rs2134661", "rs6831785", "rs17062133", "rs11733419", "rs6841502", "rs7690667", "rs12646302", "rs11736811",
+  "rs66778274", "rs72690600", "rs6856114", "rs55903810", "rs61576299", "rs16871346", "rs1691017", "rs41092",
+  "rs9313052", "rs12515674", "rs917042", "rs4620024", "rs17263496", "rs344738", "rs1898159", "rs71578761",
+  "rs1820877", "rs7445608", "rs6899183", "rs6877855", "rs2178487", "rs71627577", "rs58713827", "rs8185010",
+  "rs16887538", "rs986714", "rs4312833", "rs10461556", "rs10069589", "rs296410", "rs1807017", "rs143994017",
+  "rs34293681", "rs2341436", "rs200734310", "rs4700102", "rs149124", "rs11949644", "rs2928163", "rs1124742",
+  "rs7707036", "rs6869680", "rs6884052", "rs4601046", "rs4457115", "rs1583932", "rs111628722", "rs34743961",
+  "rs13189022", "rs4571506", "rs10057121", "rs10051975", "rs114972127", "rs142918896", "rs17082498", "rs10514370",
+  "rs17084024", "rs42417", "rs6235", "rs709359", "rs3857357", "rs113474273", "rs2431108", "rs4419567",
+  "rs2410945", "rs7711298", "rs17159969", "rs25966", "rs32006", "rs848827", "rs6596754", "rs456026",
+  "rs845742", "rs1946607", "rs26046", "rs3923411", "rs11750007", "rs6595530", "rs11241807", "rs2087639",
+  "rs3843816", "rs10478767", "rs329124", "rs34981024", "rs11743293", "rs13187474", "rs1919519", "rs6874130",
+  "rs62382989", "rs6870103", "rs545765804", "rs9763419", "rs11554572", "rs114285050", "rs3776824", "rs10515677",
+  "rs2199626", "rs2033195", "rs2313500", "rs76034731", "rs1600014", "rs1173461", "rs10069017", "rs2910300",
+  "rs11956866", "rs489346", "rs2861301", "rs2133725", "rs79476395", "rs180890", "rs4242220", "rs57840443",
+  "rs10475853", "rs5873048", "rs172137", "rs13180204", "rs68003227", "rs112614863", "rs139736667", "rs2339170",
+  "rs6880972", "rs4380681", "rs11358240", "rs35892185", "rs5873246", "rs7715167", "rs62376929", "rs17752769",
+  "rs78882748", "rs11242920", "rs9502734", "rs7762263", "rs6458439", "rs35776201", "rs2237142", "rs10498687",
+  "rs823729", "rs62403110", "rs4075048", "rs12154181", "rs4083995", "rs9393415", "rs1059490", "rs6932350",
+  "rs9295778", "rs9280934", "rs2844766", "rs4361609", "rs1144709", "rs60966951", "rs9469913", "rs9462031",
+  "rs145033539", "rs66819640", "rs3818985", "rs10755698", "rs10947695", "rs1412265", "rs9471341", "rs9462746",
+  "rs11758978", "rs1106841", "rs9369981", "rs142315257", "rs10602981", "rs57309448", "rs2744458", "rs9370336",
+  "rs1204132", "rs146628116", "rs9446876", "rs1213369", "rs2016358", "rs7760840", "rs4383775", "rs12201954",
+  "rs10455532", "rs2218418", "rs679907", "rs651819", "rs6913208", "rs9375282", "rs67192039", "rs9495779",
+  "rs68161827", "rs66466404", "rs7740783", "rs71547415", "rs664245", "rs817675", "rs71570314", "rs12216157",
+  "rs9480867", "rs9487602", "rs240977", "rs240966", "rs56298245", "rs461646", "rs6920014", "rs150138167",
+  "rs9374263", "rs9400484", "rs9400594", "rs4389796", "rs2358048", "rs10457437", "rs56314722", "rs1490384",
+  "rs13219424", "rs7762560", "rs2571570", "rs9398963", "rs4524621", "rs9385879", "rs7753052", "rs9373363",
+  "rs4895647", "rs13216473", "rs11756123", "rs6934238", "rs6903981", "rs7452620", "rs12192028", "rs59903549",
+  "rs4870492", "rs143465123", "rs3127160", "rs957906", "rs12194023", "rs9365753", "rs9459242", "rs777574",
+  "rs6459650", "rs1107609", "rs7787321", "rs6962590", "rs111246669", "rs6460944", "rs12699415", "rs35742587",
+  "rs35423455", "rs13237637", "rs35279978", "rs1915982", "rs6976669", "rs78719272", "rs62441954", "rs6943805",
+  "rs75107734", "rs2995903", "rs4719302", "rs2163692", "rs34863300", "rs62439683", "rs2237303", "rs10951019",
+  "rs56000694", "rs10264306", "rs174927", "rs35851551", "rs3793246", "rs215694", "rs6969810", "rs17170827",
+  "rs11773650", "rs60586729", "rs10256962", "rs58574961", "rs2304693", "rs7790227", "rs1026423", "rs113926268",
+  "rs56162458", "rs1525164", "rs62468710", "rs3108007", "rs79631993", "rs10234205", "rs112201809", "rs34123299",
+  "rs28673085", "rs723340", "rs847726", "rs3757589", "rs2074643", "rs7784056", "rs4730345", "rs1496765",
+  "rs258663", "rs201314273", "rs802438", "rs17574755", "rs6972809", "rs73709328", "rs2188179", "rs3801289",
+  "rs7790120", "rs2107717", "rs12536002", "rs35102403", "rs11976018", "rs2074686", "rs17136882", "rs6964395",
+  "rs13224177", "rs10244798", "rs11766326", "rs2396597", "rs4727799", "rs2214107", "rs55820401", "rs112913817",
+  "rs2401969", "rs41741", "rs10233018", "rs10240110", "rs62470547", "rs1443753", "rs10953957", "rs10242162",
+  "rs74273975", "rs1419495", "rs1361990", "rs2299469", "rs1419498", "rs35116225", "rs12666739", "rs1468155",
+  "rs2402818", "rs6964806", "rs11556924", "rs4484630", "rs6951616", "rs77283305", "rs10279261", "rs13246630",
+  "rs6970845", "rs4732267", "rs62491380", "rs2159759", "rs10246939", "rs2373415", "rs897917", "rs11980001",
+  "rs13311064", "rs10267847", "rs896782", "rs7779781", "rs11137025", "rs2656285", "rs10092705", "rs7838901",
+  "rs17778581", "rs11773992", "rs62495393", "rs6987011", "rs7387578", "rs7818819", "rs139818768", "rs140606663",
+  "rs59339059", "rs11780592", "rs11778040", "rs35969949", "rs7838316", "rs11783093", "rs73229090", "rs35598594",
+  "rs9331930", "rs2979483", "rs16879689", "rs72630922", "rs3852351", "rs36061954", "rs1968671", "rs203914",
+  "rs138838636", "rs148922525", "rs11784869", "rs2670012", "rs16923594", "rs7829715", "rs9298041", "rs58926565",
+  "rs5891934", "rs6998082", "rs7460521", "rs3053703", "rs12056484", "rs298203", "rs13280521", "rs1653246",
+  "rs17429485", "rs264792", "rs7824728", "rs7002227", "rs6651270", "rs443440", "rs2063976", "rs6471260",
+  "rs35076798", "rs201487789", "rs142552894", "rs10094543", "rs6988317", "rs9987376", "rs58672202", "rs55897841",
+  "rs7839347", "rs964917", "rs7840811", "rs2957454", "rs2156738", "rs7829948", "rs2198629", "rs10955827",
+  "rs72673939", "rs2006853", "rs3935638", "rs1870234", "rs72725147", "rs4909803", "rs13260666", "rs11776057",
+  "rs60275617", "rs73716490", "rs9694368", "rs2954661", "rs4543592", "rs7032636", "rs7027800", "rs9776466",
+  "rs10758786", "rs10976080", "rs1500307", "rs7028347", "rs7042680", "rs1931386", "rs2171662", "rs10810162",
+  "rs12555752", "rs62552211", "rs4961741", "rs190848809", "rs7867822", "rs118127326", "rs10966092", "rs1925495",
+  "rs4535830", "rs2183365", "rs10757692", "rs10491656", "rs34631017", "rs10969352", "rs7862979", "rs1508308",
+  "rs10813745", "rs376591586", "rs12378019", "rs1887431", "rs3758180", "rs72733221", "rs10283892", "rs10869058",
+  "rs431975", "rs62549142", "rs3954230", "rs1855608", "rs10780548", "rs7853970", "rs1246292", "rs4075961",
+  "rs2316182", "rs4743902", "rs10821132", "rs1355620", "rs1435253", "rs701362", "rs10761043", "rs2417683",
+  "rs7024334", "rs2417705", "rs62568582", "rs7026973", "rs2289480", "rs72757070", "rs7034152", "rs62562210",
+  "rs2149355", "rs10818099", "rs110797", "rs4837631", "rs10984781", "rs2799467", "rs59842227", "rs4838281",
+  "rs7027798", "rs1556146", "rs34553878", "rs4382592", "rs3025316", "rs7034793", "rs655559", "rs7024179",
+  "rs12001881", "rs4421680", "rs12240651", "rs11592683", "rs11594181", "rs11593180", "rs113415636", "rs12356750",
+  "rs77598735", "rs79601702", "rs1112277", "rs11256409", "rs35797585", "rs1291871", "rs11258417", "rs4111016",
+  "rs7082934", "rs7072776", "rs2027238", "rs17747622", "rs2487926", "rs67326273", "rs1775167", "rs11006185",
+  "rs11818460", "rs1892368", "rs1733758", "rs11004838", "rs409770", "rs11006580", "rs55749838", "rs2393788",
+  "rs5785498", "rs4948487", "rs16921046", "rs10822608", "rs7088152", "rs10997421", "rs7916697", "rs882985",
+  "rs7092906", "rs10762653", "rs11001963", "rs7895483", "rs35728436", "rs7068714", "rs10736354", "rs2138042",
+  "rs61857945", "rs1970506", "rs1474051", "rs4526713", "rs10883026", "rs11598856", "rs3977756", "rs11361523",
+  "rs10786721", "rs35431242", "rs7913682", "rs34957371", "rs34286991", "rs12358887", "rs9787523", "rs7904444",
+  "rs4918308", "rs12354968", "rs12245585", "rs11814823", "rs1810650", "rs10885480", "rs8192662", "rs3095122",
+  "rs9787575", "rs6599657", "rs7069641", "rs9423279", "rs7089170", "rs751514", "rs11245517", "rs10794089",
+  "rs1416712", "rs7074272", "rs12773533", "rs111904243", "rs35241644", "rs74609643", "rs3750944", "rs10769878",
+  "rs3794012", "rs79305858", "rs4757956", "rs11022766", "rs4500467", "rs4426098", "rs217751", "rs7122118",
+  "rs4757638", "rs35891966", "rs11026630", "rs10834400", "rs1304100", "rs7106058", "rs36070170", "rs1519480",
+  "rs6265", "rs10835213", "rs7127383", "rs11031122", "rs117206427", "rs1806152", "rs7120923", "rs1402954",
+  "rs11600794", "rs6485210", "rs7124946", "rs10837652", "rs7930009", "rs10768805", "rs11037258", "rs7114842",
+  "rs56852527", "rs2860404", "rs61882711", "rs11039348", "rs11228699", "rs2729356", "rs11602535", "rs6856",
+  "rs72926005", "rs72926006", "rs617051", "rs508168", "rs11606015", "rs733303", "rs143681422", "rs12363523",
+  "rs7948839", "rs72932730", "rs2921343", "rs184654", "rs7930907", "rs10899498", "rs6592850", "rs11231968",
+  "rs113273083", "rs10898240", "rs7929518", "rs12798192", "rs6483465", "rs6483466", "rs67032532", "rs12291122",
+  "rs3847523", "rs2263368", "rs7131178", "rs523934", "rs3018629", "rs12283068", "rs11224883", "rs1942512",
+  "rs1939153", "rs528337", "rs784147", "rs7116683", "rs1447463", "rs2186709", "rs1940720", "rs4439551",
+  "rs142861910", "rs2437694", "rs5794844", "rs4937993", "rs10891510", "rs238926", "rs1784940", "rs1075790",
+  "rs34298380", "rs519185", "rs4936649", "rs1834306", "rs6589965", "rs11218928", "rs6590071", "rs142589069",
+  "rs35306015", "rs11220781", "rs11220973", "rs12789441", "rs1793585", "rs412486", "rs748807", "rs1106363",
+  "rs2010921", "rs540356", "rs10750524", "rs678495", "rs111258054", "rs2368831", "rs11062161", "rs6487460",
+  "rs7978272", "rs7963653", "rs77216612", "rs1107321", "rs9651873", "rs12297948", "rs7960282", "rs12814947",
+  "rs2467111", "rs12306461", "rs2055731", "rs3112134", "rs1874349", "rs17468002", "rs12822020", "rs793191",
+  "rs12366442", "rs2374168", "rs10843978", "rs2171290", "rs1996880", "rs10876551", "rs11183201", "rs3997",
+  "rs2446999", "rs933738", "rs7973807", "rs2089439", "rs7970368", "rs4759073", "rs11343216", "rs7302200",
+  "rs8873", "rs10877196", "rs273784", "rs11174476", "rs7301138", "rs7969559", "rs710652", "rs11609294",
+  "rs3858590", "rs1852391", "rs936414", "rs2615841", "rs11115402", "rs10862841", "rs34847753", "rs7303099",
+  "rs10776975", "rs10745432", "rs704067", "rs2165036", "rs10859334", "rs12370612", "rs10128864", "rs10860552",
+  "rs7959287", "rs12827945", "rs2649705", "rs961498", "rs61939989", "rs7310199", "rs803567", "rs6539462",
+  "rs77215829", "rs71469748", "rs1104863", "rs9805009", "rs664211", "rs2859263", "rs3861791", "rs12314162",
+  "rs1666839", "rs11366682", "rs10773253", "rs11246850", "rs11611651", "rs608819", "rs7335069", "rs4771102",
+  "rs9315010", "rs2022381", "rs116880181", "rs9576071", "rs9576317", "rs9533455", "rs1577576", "rs7333724",
+  "rs61959481", "rs3098272", "rs9527825", "rs7981494", "rs1831851", "rs4523833", "rs2321878", "rs9563710",
+  "rs9317080", "rs2670488", "rs11619205", "rs9317415", "rs60966685", "rs17080891", "rs9540731", "rs1925750",
+  "rs7322280", "rs9529428", "rs9572062", "rs303948", "rs9565423", "rs2783129", "rs524278", "rs1772570",
+  "rs9545997", "rs9560422", "rs9560423", "rs6492538", "rs11842834", "rs1328365", "rs2813620", "rs79982876",
+  "rs1164598", "rs7318798", "rs9517908", "rs1980708", "rs4771353", "rs7993332", "rs9585549", "rs9518395",
+  "rs2575161", "rs6491862", "rs332643", "rs426171", "rs1887199", "rs7145002", "rs73581416", "rs117833529",
+  "rs4048168", "rs6575873", "rs12896349", "rs10143239", "rs10143240", "rs10131252", "rs8007897", "rs7140402",
+  "rs2145451", "rs10133887", "rs10132896", "rs66480876", "rs7148057", "rs3844012", "rs1813271", "rs4597230",
+  "rs12896640", "rs57167554", "rs2222360", "rs8021636", "rs1188188", "rs385141", "rs698015", "rs709947",
+  "rs860326", "rs950621", "rs9323328", "rs77240686", "rs61981649", "rs36363", "rs17122267", "rs8021517",
+  "rs12433385", "rs1811739", "rs4903626", "rs1617033", "rs2035284", "rs8020458", "rs12879016", "rs726020",
+  "rs1198415", "rs4899839", "rs9323775", "rs1048190", "rs12882654", "rs242740", "rs12434284", "rs1242889",
+  "rs11160152", "rs1243519", "rs2604988", "rs77556698", "rs1381287", "rs12887138", "rs4905742", "rs10133235",
+  "rs2693672", "rs561278583", "rs56111277", "rs11623574", "rs8010285", "rs148815688", "rs11625650", "rs34972816",
+  "rs1435679", "rs62045766", "rs1587654", "rs60924694", "rs12148053", "rs10654863", "rs8033799", "rs34488670",
+  "rs281296", "rs12909734", "rs1435757", "rs1435741", "rs34713698", "rs12910175", "rs515611", "rs78077031",
+  "rs7181586", "rs12916690", "rs10519068", "rs34908380", "rs79503123", "rs1550030", "rs7173420", "rs2289791",
+  "rs11631474", "rs60833441", "rs56113544", "rs62007780", "rs61246633", "rs12907966", "rs11632439", "rs67465431",
+  "rs4779034", "rs56390520", "rs12442563", "rs12593149", "rs2584165", "rs10162833", "rs17514846", "rs10152627",
+  "rs3743464", "rs11073479", "rs1155641", "rs6598539", "rs3752489", "rs763053", "rs72774497", "rs8048452",
+  "rs7189389", "rs6500742", "rs62017761", "rs4787000", "rs881562", "rs9921983", "rs2352743", "rs12932099",
+  "rs4780430", "rs11640541", "rs7185370", "rs4597346", "rs9302428", "rs6497840", "rs10492801", "rs4787766",
+  "rs58317978", "rs7201780", "rs113711981", "rs12918288", "rs11076496", "rs4785187", "rs71382768", "rs8050598",
+  "rs12918191", "rs56382432", "rs62047987", "rs7190195", "rs31111", "rs78741651", "rs9941110", "rs1078279",
+  "rs58816741", "rs9930063", "rs28628339", "rs10852456", "rs3217435", "rs67771172", "rs6499564", "rs9930813",
+  "rs12930834", "rs76098878", "rs4243136", "rs58508930", "rs4888444", "rs62050081", "rs34895689", "rs3865190",
+  "rs889714", "rs3784943", "rs3759973", "rs9935369", "rs1050847", "rs4785687", "rs11648898", "rs4790874",
+  "rs9898228", "rs238227", "rs73341258", "rs12452660", "rs8075482", "rs12945870", "rs541531837", "rs11658322",
+  "rs11650183", "rs1476810", "rs9895335", "rs11080075", "rs8614", "rs3103307", "rs12943365", "rs10586215",
+  "rs2302276", "rs11080208", "rs9893935", "rs56322375", "rs17638867", "rs79676758", "rs8069451", "rs60335331",
+  "rs62055494", "rs111321973", "rs2214258", "rs56364632", "rs55711631", "rs113161176", "rs12150111", "rs56072903",
+  "rs72836318", "rs17717246", "rs7209022", "rs2970015", "rs1393730", "rs12450133", "rs764583", "rs4793875",
+  "rs7209789", "rs9902312", "rs9909210", "rs4969071", "rs112210999", "rs1105820", "rs8074498", "rs9890316",
+  "rs67422659", "rs76325846", "rs12457278", "rs549606", "rs752911", "rs1429934", "rs67058932", "rs6508344",
+  "rs9961429", "rs6508396", "rs10853676", "rs1007779", "rs4239385", "rs12968586", "rs1662904", "rs73428490",
+  "rs4800092", "rs1550716", "rs10153427", "rs28571985", "rs56034381", "rs2448775", "rs12455277", "rs768576",
+  "rs72898831", "rs7240835", "rs8083764", "rs34418947", "rs8095056", "rs62098013", "rs1972596", "rs1942893",
+  "rs56029033", "rs1549320", "rs7231005", "rs113211552", "rs8094501", "rs154917", "rs12961968", "rs4891371",
+  "rs9958582", "rs8087283", "rs72975418", "rs17056851", "rs3213876", "rs470802", "rs35841477", "rs62098902",
+  "rs71367545", "rs71338065", "rs62096717", "rs56357145", "rs112873699", "rs75177132", "rs12983032", "rs11672104",
+  "rs17724992", "rs34010330", "rs4808821", "rs11669516", "rs888303", "rs6509401", "rs78137993", "rs33959890",
+  "rs8106197", "rs11672573", "rs117610843", "rs10414054", "rs12982234", "rs11083560", "rs2238681", "rs1644350",
+  "rs11083858", "rs61746970", "rs35112940", "rs12971931", "rs16987303", "rs6084229", "rs71330271", "rs55771103",
+  "rs80044408", "rs112016016", "rs6136505", "rs873327", "rs2424351", "rs6050215", "rs2254046", "rs6089104",
+  "rs11298072", "rs6141753", "rs1569686", "rs6088618", "rs2425371", "rs6102448", "rs6030775", "rs6017733",
+  "rs6018329", "rs226813", "rs150215935", "rs6022179", "rs910382", "rs56010476", "rs6014546", "rs6092934",
+  "rs62207181", "rs6101322", "rs1776263", "rs13036436", "rs12627380", "rs2825172", "rs994115", "rs34058918",
+  "rs7275208", "rs987755", "rs1827747", "rs1319461", "rs62221587", "rs2834092", "rs2211698", "rs12626319",
+  "rs3787835", "rs11088418", "rs117143374", "rs4818005", "rs367001", "rs9978431", "rs547085658", "rs373687",
+  "rs1640297", "rs17372172", "rs4822933", "rs134529", "rs136232", "rs11703775", "rs1894525", "rs2092077",
+  "rs139921", "rs150398197", "rs5996139", "rs137154", "rs8139201", "rs2224240", "rs5771778", "rs6009127"
+)
+
+# AgeSmk EUR: 26 RSIDs
+saunders_agesmk_eur_lead <- c(
+  "rs10801826", "rs4953150", "rs11125820", "rs62180314", "rs12611472", "rs7640342", "rs1449398", "rs9759071",
+  "rs6819310", "rs1705045", "rs10434247", "rs4975731", "rs6452795", "rs17415237", "rs2296740", "rs4386875",
+  "rs7780621", "rs11780471", "rs2149355", "rs10712445", "rs142708876", "rs7977614", "rs369230", "rs413501",
+  "rs3764352", "rs538656"
+)
+
+# CigDay EUR: 153 RSIDs
+saunders_cigday_eur_lead <- c(
+  "rs12127865", "rs6699355", "rs2226279", "rs2602929", "rs66480557", "rs2133203", "rs113479202", "rs111319645",
+  "rs2072659", "rs10922300", "rs62106258", "rs2867125", "rs6711254", "rs35747121", "rs7599488", "rs78408772",
+  "rs113620077", "rs10204824", "rs1528844", "rs1601071", "rs9881798", "rs12638345", "rs6446253", "rs7615675",
+  "rs13072911", "rs12632259", "rs4402868", "rs2167046", "rs2326316", "rs1449371", "rs17459563", "rs72615727",
+  "rs77852438", "rs78015688", "rs1449382", "rs4856592", "rs1375550", "rs145483821", "rs699165", "rs9867678",
+  "rs13082712", "rs6775877", "rs4577498", "rs3021131", "rs6811929", "rs11725618", "rs873129", "rs2231156",
+  "rs2074393", "rs12514566", "rs4307079", "rs17153597", "rs258776", "rs62373795", "rs62373813", "rs7732121",
+  "rs9366649", "rs2451381", "rs72895674", "rs9320505", "rs9320508", "rs4027747", "rs215600", "rs4917017",
+  "rs2851509", "rs113071160", "rs10240199", "rs9719950", "rs10248004", "rs11135997", "rs1565735", "rs59921964",
+  "rs35116962", "rs58379124", "rs55828312", "rs11289227", "rs78116261", "rs1217106", "rs13269731", "rs77235879",
+  "rs10992828", "rs814697", "rs117911387", "rs113067637", "rs75505227", "rs78094364", "rs75596189", "rs7872903",
+  "rs3025388", "rs1291809", "rs4933712", "rs7951365", "rs1355890", "rs10128753", "rs10742683", "rs3809047",
+  "rs4630328", "rs7928017", "rs7101437", "rs35247189", "rs112042980", "rs2241208", "rs7139640", "rs9564358",
+  "rs1950381", "rs1892559", "rs141486917", "rs710284", "rs12590968", "rs3831093", "rs1657936", "rs4775086",
+  "rs72736802", "rs10519198", "rs12902602", "rs150299", "rs11648938", "rs34839", "rs1870293", "rs12447501",
+  "rs1582325", "rs12922230", "rs6499135", "rs889398", "rs460984", "rs34357723", "rs2447091", "rs8614",
+  "rs28694505", "rs12967143", "rs8098032", "rs7240682", "rs7351050", "rs112990034", "rs11084583", "rs11881918",
+  "rs28399462", "rs150586234", "rs28399448", "rs56113850", "rs28399442", "rs117824460", "rs11672911", "rs111373319",
+  "rs66726054", "rs6078373", "rs6141314", "rs11298072", "rs6058750", "rs2273500", "rs45568238", "rs11697662",
+  "rs79739740"
+)
+
+# SmkCes EUR: 125 RSIDs
+saunders_smkcess_eur_lead <- c(
+  "rs7521775", "rs10794514", "rs3791151", "rs1171279", "rs6677439", "rs699536", "rs17379561", "rs12727810",
+  "rs9724968", "rs6673326", "rs6425284", "rs12046747", "rs72781639", "rs12614418", "rs7569203", "rs1369294",
+  "rs10191428", "rs7598901", "rs2916251", "rs1374328", "rs78590213", "rs56222728", "rs12693975", "rs34762726",
+  "rs7613360", "rs6803651", "rs9833290", "rs2171141", "rs1870008", "rs1711161", "rs36035502", "rs75096215",
+  "rs76757555", "rs77698860", "rs11937919", "rs115737563", "rs62310097", "rs11721364", "rs1000350", "rs55669488",
+  "rs7668995", "rs4691521", "rs7705852", "rs329120", "rs4705014", "rs263886", "rs11738110", "rs2073526",
+  "rs13203795", "rs7778443", "rs62459050", "rs113067414", "rs13245429", "rs7794285", "rs4265129", "rs62474673",
+  "rs12154872", "rs2098112", "rs3807890", "rs11991338", "rs2736268", "rs11773992", "rs11776293", "rs1565735",
+  "rs11990422", "rs10738785", "rs10819036", "rs4837011", "rs4838291", "rs112883710", "rs112395992", "rs113067637",
+  "rs3888560", "rs78094364", "rs739447", "rs7872903", "rs1108581", "rs10509123", "rs7896518", "rs35649565",
+  "rs61861137", "rs1827535", "rs2585817", "rs1783818", "rs10792430", "rs2734838", "rs11223560", "rs11171710",
+  "rs4417327", "rs8756", "rs17113564", "rs7960340", "rs678436", "rs4902704", "rs12884296", "rs7152530",
+  "rs34161718", "rs35534970", "rs58365910", "rs11331126", "rs667282", "rs150300", "rs35198836", "rs75744751",
+  "rs1364349", "rs3759982", "rs727428", "rs4925130", "rs66481362", "rs1941472", "rs61537869", "rs11881918",
+  "rs10853742", "rs150586234", "rs56113850", "rs28399443", "rs57837628", "rs117824460", "rs6011779", "rs12479680",
+  "rs45497800", "rs79739740", "rs11699828", "rs9611540", "rs2542028"
+)
+
+# DrnkWk EUR: 500 RSIDs
+saunders_drnkwk_eur_lead <- c(
+  "rs2298214", "rs3762438", "rs1710420", "rs7526802", "rs7517155", "rs34649127", "rs2992073", "rs1123295",
+  "rs2184187", "rs7548997", "rs11211480", "rs7517344", "rs182823", "rs2489907", "rs6661985", "rs5024204",
+  "rs175318", "rs75047930", "rs11162021", "rs507821", "rs1050818", "rs12039810", "rs7539883", "rs56292878",
+  "rs199956", "rs199925", "rs11755", "rs10922218", "rs41304257", "rs823116", "rs3897795", "rs12739983",
+  "rs62107261", "rs17338491", "rs7599455", "rs1001129", "rs672643", "rs369277568", "rs7566052", "rs1260326",
+  "rs11336847", "rs11127048", "rs58199976", "rs13417374", "rs2599510", "rs379410", "rs17029700", "rs13383034",
+  "rs1004787", "rs6710889", "rs11690748", "rs10528", "rs2864049", "rs2717063", "rs6739804", "rs190097147",
+  "rs113023108", "rs828867", "rs1667619", "rs11126776", "rs11692435", "rs3106494", "rs77347005", "rs7562032",
+  "rs7581524", "rs72843198", "rs1427617", "rs10496927", "rs143664518", "rs12052901", "rs12052916", "rs13024996",
+  "rs145441368", "rs144658012", "rs62169568", "rs72857423", "rs72859280", "rs34891898", "rs10197633", "rs1267037",
+  "rs77798569", "rs3754812", "rs1453376", "rs12469449", "rs4455125", "rs6723680", "rs12998288", "rs75214378",
+  "rs28485712", "rs67465824", "rs2602286", "rs202196311", "rs7594223", "rs2713556", "rs10183383", "rs2884731",
+  "rs11713946", "rs9876976", "rs2268762", "rs4682718", "rs11710277", "rs11542804", "rs2276838", "rs112586249",
+  "rs9882553", "rs9882299", "rs7640541", "rs12487273", "rs10510969", "rs6549282", "rs17007232", "rs35378923",
+  "rs62244884", "rs7634176", "rs9883163", "rs9863620", "rs71626887", "rs62250686", "rs62250687", "rs144059553",
+  "rs11920427", "rs1025531", "rs11376660", "rs11127893", "rs1449401", "rs2117137", "rs2310773", "rs1499974",
+  "rs9838144", "rs13325911", "rs9849775", "rs2279829", "rs1394042", "rs9862527", "rs1656377", "rs336551",
+  "rs7618629", "rs71323714", "rs362312", "rs362307", "rs58949959", "rs79901610", "rs6828213", "rs6846892",
+  "rs11940694", "rs10030384", "rs4861024", "rs12507026", "rs13111157", "rs59138935", "rs7656088", "rs899632",
+  "rs2318539", "rs75675343", "rs1994190", "rs4693642", "rs11931134", "rs29001570", "rs540508277", "rs1229984",
+  "rs4147541", "rs4699743", "rs6843522", "rs148500703", "rs72906741", "rs188514326", "rs13107325", "rs4834272",
+  "rs6845321", "rs936891", "rs62317870", "rs6813691", "rs1425522", "rs4690727", "rs12502713", "rs6843300",
+  "rs1589569", "rs2139817", "rs10027081", "rs6828361", "rs11937621", "rs35058767", "rs13158011", "rs11949611",
+  "rs6884007", "rs55833463", "rs7447792", "rs15807", "rs888817", "rs1896892", "rs4916723", "rs1278696",
+  "rs11739054", "rs4489042", "rs26561", "rs55767930", "rs58237345", "rs1549203", "rs13161764", "rs12717923",
+  "rs6862136", "rs4130573", "rs10062352", "rs7442819", "rs12203592", "rs9349379", "rs1240582", "rs145197517",
+  "rs4446587", "rs9265727", "rs742870", "rs73739867", "rs1409884", "rs2661503", "rs2136135", "rs79872778",
+  "rs72877623", "rs13208885", "rs12175393", "rs217304", "rs9372734", "rs58172619", "rs271851", "rs2235997",
+  "rs14399", "rs4946198", "rs10085247", "rs72980127", "rs72980129", "rs9386174", "rs7757639", "rs2322440",
+  "rs146131456", "rs138864823", "rs10277990", "rs11764779", "rs11762401", "rs182026513", "rs10234489", "rs10228416",
+  "rs2003492", "rs12702099", "rs210600", "rs41510047", "rs78815801", "rs13245286", "rs6968852", "rs929356",
+  "rs6946717", "rs410", "rs10258757", "rs17552240", "rs11973460", "rs367026", "rs194847", "rs68030304",
+  "rs339054", "rs7783327", "rs7787272", "rs13230245", "rs713598", "rs67726625", "rs34281361", "rs5888528",
+  "rs2622238", "rs10100132", "rs2977733", "rs6984305", "rs541027705", "rs35842344", "rs139715296", "rs2010776",
+  "rs62517386", "rs4739105", "rs10113566", "rs13273490", "rs2165905", "rs4297019", "rs13259172", "rs7824565",
+  "rs13273763", "rs2142330", "rs28601761", "rs3739239", "rs6474562", "rs944426", "rs12001661", "rs7857323",
+  "rs2183825", "rs2383766", "rs7869501", "rs10813340", "rs12554874", "rs1388110958", "rs11143585", "rs61049690",
+  "rs112024083", "rs141889693", "rs56300626", "rs9330452", "rs11792106", "rs7047202", "rs4836827", "rs10985793",
+  "rs3739760", "rs10819272", "rs4740381", "rs55829876", "rs5030890", "rs12775696", "rs7072005", "rs7073934",
+  "rs7907967", "rs61873510", "rs35180103", "rs56163495", "rs17778423", "rs74813718", "rs112450578", "rs11248625",
+  "rs10901373", "rs2489380", "rs10741228", "rs71512279", "rs5005421", "rs11042016", "rs11042029", "rs2283250",
+  "rs2049045", "rs11338805", "rs2956781", "rs12803525", "rs12802273", "rs35360605", "rs35392358", "rs10838782",
+  "rs10750955", "rs589030", "rs4542420", "rs7118897", "rs7117465", "rs11021133", "rs11021302", "rs1940729",
+  "rs1940728", "rs7943198", "rs2514218", "rs72997447", "rs1894071", "rs682011", "rs7937768", "rs678531",
+  "rs11222890", "rs2132489", "rs10848625", "rs7307912", "rs7306606", "rs7954221", "rs35011311", "rs2099016",
+  "rs10875958", "rs7132908", "rs11170652", "rs1140681", "rs324012", "rs7131926", "rs1262101", "rs12826108",
+  "rs7959601", "rs10128991", "rs7313721", "rs1426371", "rs888194", "rs2240310", "rs10774579", "rs3190836",
+  "rs1006100", "rs75471611", "rs500321", "rs9315346", "rs9590686", "rs17478715", "rs9527106", "rs9537938",
+  "rs17702278", "rs1892350", "rs2783129", "rs338708", "rs117907741", "rs9558931", "rs942033", "rs28521294",
+  "rs1884010", "rs11156760", "rs7143918", "rs1123285", "rs34864350", "rs10782438", "rs61987994", "rs73276994",
+  "rs761898", "rs862329", "rs8020365", "rs12882435", "rs28929474", "rs915380", "rs2403172", "rs11625650",
+  "rs10518849", "rs4597272", "rs8038764", "rs541871", "rs281264", "rs7164309", "rs7162115", "rs7176597",
+  "rs733434", "rs147895868", "rs12902072", "rs8192477", "rs10520618", "rs76000817", "rs882175", "rs34775748",
+  "rs2091532", "rs30244", "rs72771074", "rs78621285", "rs17177078", "rs9940156", "rs4149392", "rs35626515",
+  "rs35799388", "rs1558902", "rs231044", "rs891096", "rs11641316", "rs1972658", "rs34101687", "rs862227",
+  "rs11860773", "rs62062567", "rs3815795", "rs11078696", "rs12951376", "rs35888506", "rs732770", "rs12453397",
+  "rs9912669", "rs796912950", "rs11079849", "rs4890041", "rs11657366", "rs8074498", "rs1788784", "rs4633802",
+  "rs1443641", "rs12457578", "rs9966588", "rs11873164", "rs1373178", "rs62099236", "rs6508226", "rs2958163",
+  "rs10164243", "rs1942964", "rs9950738", "rs35399883", "rs12104325", "rs11086110", "rs2238661", "rs62107115",
+  "rs12976157", "rs4802774", "rs147649409", "rs2638282", "rs2081194", "rs113176985", "rs4438553", "rs2208972",
+  "rs6135520", "rs201594", "rs3830852", "rs6120571", "rs6129806", "rs909802", "rs803192", "rs8116808",
+  "rs35400171", "rs2834083", "rs2839402", "rs5760423", "rs139710166", "rs4823074", "rs9610866", "rs1013339",
+  "rs5757712", "rs9611609", "rs9607814", "rs713763"
+)
+
+# SmkInit EAS: 7 RSIDs
+saunders_smkinit_eas_lead <- c(
+  "rs4287126", "rs2138448", "rs146121542", "rs6265", "rs1436380", "rs13381024", "rs3838009"
+)
+
+# CigDay EAS: 16 RSIDs
+saunders_cigday_eas_lead <- c(
+  "rs78277894", "rs7311323", "rs12227162", "rs2339717", "rs71581744", "rs938682", "rs10402624", "rs11881124",
+  "rs147400515", "rs66889044", "rs140980078", "rs11668399", "rs79468636", "rs4803402", "rs8100418", "rs144252600"
+)
+
+# SmkCes EAS: 4 RSIDs
+saunders_smkcess_eas_lead <- c(
+  "rs117217932", "rs28553280", "rs2236196", "rs13044526"
+)
+
+# DrnkWk EAS: 9 RSIDs
+saunders_drnkwk_eas_lead <- c(
+  "rs33968162", "rs16996598", "rs4699726", "rs1229984", "rs1229982", "rs79739935", "rs4075292", "rs142915423",
+  "rs149803063"
+)
+
+# CigDay AFR: 2 RSIDs
+saunders_cigday_afr_lead <- c(
+  "rs17486278", "rs11667314"
+)
+
+# DrnkWk AFR: 1 RSIDs
+saunders_drnkwk_afr_lead <- c(
+  "rs2066702"
+)
+
+# SmkInit AMR: 23 RSIDs
+saunders_smkinit_amr_lead <- c(
+  "rs202215468", "rs12125521", "rs1004787", "rs6750524", "rs1533426", "rs1603985", "rs12485264", "rs9846326",
+  "rs185441935", "rs7695776", "rs6843761", "rs35327802", "rs4945881", "rs4607498", "rs12537384", "rs78875955",
+  "rs4517468", "rs11214436", "rs16949179", "rs6499244", "rs12936927", "rs12051850", "rs6011779"
+)
+
+# CigDay AMR: 2 RSIDs
+saunders_cigday_amr_lead <- c(
+  "rs2456020", "rs1317286"
+)
+
+# DrnkWk AMR: 7 RSIDs
+saunders_drnkwk_amr_lead <- c(
+  "rs1260326", "rs1028013", "rs11940694", "rs57645502", "rs1229984", "rs72906779", "rs10736856"
+)
+```
+
+```{r}
+# Saunders: plot all available lead SNPs with 95% confidence intervals
+
+# For every phenotype:
+#   - Plot every available Saunders lead SNP.
+
+# For Smoking Initiation:
+#   - Also create a second figure containing only lead SNPs
+#     with KU/KUF P < 0.05.
+
+# Horizontal error bars:
+#   KU/KUF 95% confidence intervals
+
+# Vertical error bars:
+#   Saunders 95% confidence intervals
+
+# Red points:
+#   KU/KUF P < 1e-5
+
+
+# Saunders input files
+saunders_dir <- "/Users/nico/work/sud/saunders_lifted_harmonized"
+
+files <- list.files(
+  path = saunders_dir,
+  pattern = "^(ku|kuf)_(AgeSmk|CigDay|DrnkWk|SmkCes|SmkInit)_(AFR|AMR|EAS|EUR)_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+files <- sort(files)
+
+
+cat(
+  "Saunders files found:",
+  length(files),
+  "\n"
+)
+
+print(basename(files))
+
+
+if (length(files) == 0) {
+
+  stop(
+    "No Saunders harmonized files were found in: ",
+    saunders_dir
+  )
+}
+
+
+# Function used to create each plot
+make_saunders_plot <- function(
+  plot_dat,
+  x_beta,
+  y_beta,
+  x_p,
+  khat_trait,
+  khat_n_label,
+  trait_label,
+  saunders_label,
+  saunders_n_label,
+  saunders_se_source,
+  filter_label = NULL
+) {
+
+  if (nrow(plot_dat) == 0) {
+
+    cat(
+      "Skipping plot because no variants remained.\n"
+    )
+
+    return(invisible(NULL))
+  }
+
+
+
+  # Count plotted variants with nominal KU/KUF association (P < 0.05)
+  khat_p05_count <- sum(
+    !is.na(plot_dat[[x_p]]) &
+      is.finite(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < 0.05
+  )
+
+  cat(
+    khat_trait,
+    " variants with P < 0.05:",
+    khat_p05_count,
+    "\n"
+  )
+
+  # Pearson correlation is calculated using only
+  # the variants shown in the current figure.
+  if (
+    nrow(plot_dat) >= 3 &&
+      length(unique(plot_dat[[x_beta]])) >= 2 &&
+      length(unique(plot_dat[[y_beta]])) >= 2
+  ) {
+
+    pearson_test <- cor.test(
+      plot_dat[[x_beta]],
+      plot_dat[[y_beta]],
+      method = "pearson"
+    )
+
+    title_correlation <- paste0(
+      " | r = ",
+      round(
+        unname(pearson_test$estimate),
+        4
+      )
+    )
+
+    correlation_label <- paste0(
+      "Pearson p = ",
+      format.pval(
+        pearson_test$p.value,
+        digits = 3,
+        eps = 1e-300
+      )
+    )
+
+  } else {
+
+    title_correlation <- ""
+
+    correlation_label <- paste0(
+      "Pearson correlation not calculated; ",
+      nrow(plot_dat),
+      " complete lead SNP",
+      ifelse(
+        nrow(plot_dat) == 1,
+        "",
+        "s"
+      ),
+      " available"
+    )
+  }
+
+
+  # Add threshold wording only to the filtered
+  # Smoking Initiation figure.
+  if (is.null(filter_label)) {
+
+    title_filter_text <- ""
+    subtitle_filter_text <- ""
+
+  } else {
+
+    title_filter_text <- paste0(
+      " ",
+      filter_label
+    )
+
+    subtitle_filter_text <- paste0(
+      " | ",
+      filter_label
+    )
+  }
+
+
+  # Generalized Deming regression
+  deming_results <- get_deming_results(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_se = "se_khat",
+    y_se = "se_saunders"
+  )
+
+  add_comparison_summary(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_p = x_p,
+    khat_trait = khat_trait,
+    comparison_label = saunders_label,
+    deming_results = deming_results
+  )
+
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+
+    # Horizontal KU/KUF 95% confidence intervals
+    geom_errorbar(
+      aes(
+        xmin = x_ci_lower,
+        xmax = x_ci_upper
+      ),
+      orientation = "y",
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Vertical Saunders 95% confidence intervals
+    geom_errorbar(
+      aes(
+        ymin = y_ci_lower,
+        ymax = y_ci_upper
+      ),
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Plot Saunders lead SNPs
+    geom_point(
+      alpha = 0.6,
+      size = 3
+    ) +
+
+    # Ordinary least-squares line of best fit
+    {
+      if (
+        nrow(plot_dat) >= 2 &&
+          length(unique(plot_dat[[x_beta]])) >= 2
+      ) {
+
+        geom_smooth(
+          method = "lm",
+          formula = y ~ x,
+          se = FALSE,
+          color = "blue",
+          linetype = "dashed",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Generalized Deming regression line
+    {
+      if (
+        is.finite(deming_results$intercept) &&
+          is.finite(deming_results$slope)
+      ) {
+
+        geom_abline(
+          intercept = deming_results$intercept,
+          slope = deming_results$slope,
+          color = "blue",
+          linetype = "solid",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Highlight KU/KUF P < 1e-5
+    geom_point(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      color = "red",
+      size = 3.5
+    ) +
+
+    # Label only highlighted SNPs
+    geom_text_repel(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      aes(
+        label = plot_marker
+      ),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+
+    geom_hline(
+      yintercept = 0
+    ) +
+
+    geom_vline(
+      xintercept = 0
+    ) +
+
+    theme_bw() +
+
+    theme(
+      plot.title = element_text(
+        size = 8
+      ),
+      plot.subtitle = element_text(
+        size = 5
+      )
+    ) +
+
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x ",
+        saunders_label,
+        " Lead SNPs",
+        title_filter_text,
+        title_correlation
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        saunders_n_label,
+        " | Lead SNPs plotted = ",
+        nrow(plot_dat),
+        subtitle_filter_text,
+        " | Error bars = 95% CIs",
+        " | ",
+        deming_results$label,
+        " | ",
+        correlation_label
+      ),
+      x = paste0(
+        khat_trait,
+        " beta"
+      ),
+      y = paste0(
+        trait_label,
+        " beta"
+      )
+    )
+
+
+  print(p)
+}
+
+
+# Process and plot each Saunders file
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE,
+    quote = "",
+    comment.char = ""
+  )
+
+
+  # Identify required columns
+  x_beta <- grep(
+    "^beta_ku$|^beta_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+  y_beta <- grep(
+    "_to_khat_A1$",
+    names(dat),
+    value = TRUE
+  )
+
+  x_p <- grep(
+    "^p_ku$|^p_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+
+  cat(
+    "x_beta:",
+    paste(x_beta, collapse = ", "),
+    "\n"
+  )
+
+  cat(
+    "y_beta:",
+    paste(y_beta, collapse = ", "),
+    "\n"
+  )
+
+  cat(
+    "x_p:",
+    paste(x_p, collapse = ", "),
+    "\n"
+  )
+
+
+  if (
+    length(x_beta) != 1 ||
+      length(y_beta) != 1 ||
+      length(x_p) != 1 ||
+      !("khat_marker" %in% names(dat))
+  ) {
+
+    cat(
+      "Skipping because required columns were not identified.\n"
+    )
+
+    print(names(dat))
+
+    next
+  }
+
+
+  # Identify the Saunders p-value column.
+  
+  # First prefer an exact P column.
+  # Otherwise search common p-value column names,
+  # excluding the KU/KUF p-value column.
+  if ("P" %in% names(dat)) {
+
+    y_p <- "P"
+
+  } else {
+
+    y_p_candidates <- grep(
+      "^p$|^pval$|^p_value$|^pvalue$|pval|p_value|pvalue",
+      names(dat),
+      value = TRUE,
+      ignore.case = TRUE
+    )
+
+    y_p_candidates <- setdiff(
+      y_p_candidates,
+      x_p
+    )
+
+    if (length(y_p_candidates) >= 1) {
+
+      y_p <- y_p_candidates[1]
+
+    } else {
+
+      y_p <- character(0)
+    }
+  }
+
+
+  # Search for a reported Saunders SE column.
+  
+  # Exclude columns that appear to belong to KU/KUF.
+  y_se_candidates <- grep(
+    "^SE$|^se$|stderr|std_err|standard_error",
+    names(dat),
+    value = TRUE,
+    ignore.case = TRUE
+  )
+
+  y_se_candidates <- y_se_candidates[
+    !grepl(
+      "ku|kuf|khat",
+      y_se_candidates,
+      ignore.case = TRUE
+    )
+  ]
+
+
+  cat(
+    "Saunders p-value candidate:",
+    paste(y_p, collapse = ", "),
+    "\n"
+  )
+
+  cat(
+    "Saunders SE candidates:",
+    paste(y_se_candidates, collapse = ", "),
+    "\n"
+  )
+
+
+  # Convert required columns to numeric
+  dat[[x_beta]] <- suppressWarnings(
+    as.numeric(dat[[x_beta]])
+  )
+
+  dat[[y_beta]] <- suppressWarnings(
+    as.numeric(dat[[y_beta]])
+  )
+
+  dat[[x_p]] <- suppressWarnings(
+    as.numeric(dat[[x_p]])
+  )
+
+  dat$khat_marker <- as.character(
+    dat$khat_marker
+  )
+
+
+  # Parse filename
+  
+  # Expected:
+  # ku_AgeSmk_AFR_harmonized.txt
+  # kuf_SmkInit_EUR_harmonized.txt
+  file_name <- basename(file)
+
+  filename_match <- regexec(
+    pattern = "^(ku|kuf)_(AgeSmk|CigDay|DrnkWk|SmkCes|SmkInit)_(AFR|AMR|EAS|EUR)_harmonized\\.txt$",
+    text = file_name
+  )
+
+  filename_parts <- regmatches(
+    file_name,
+    filename_match
+  )[[1]]
+
+
+  if (length(filename_parts) != 4) {
+
+    cat(
+      "Skipping because filename did not match the expected Saunders format:",
+      file_name,
+      "\n"
+    )
+
+    next
+  }
+
+
+  khat_raw <- filename_parts[2]
+  trait_raw <- filename_parts[3]
+  ancestry <- filename_parts[4]
+
+
+  cat("Khat phenotype:", khat_raw, "\n")
+  cat("Phenotype:", trait_raw, "\n")
+  cat("Ancestry:", ancestry, "\n")
+
+
+  # KU/KUF labels
+  if (khat_raw == "ku") {
+
+    khat_trait <- "Khat Use"
+    khat_n_label <- "KU N = 33,210"
+
+  } else if (khat_raw == "kuf") {
+
+    khat_trait <- "Khat Use Frequency"
+    khat_n_label <- "KUF N = 25,869"
+
+  } else {
+
+    cat(
+      "Skipping because khat phenotype was not recognized:",
+      khat_raw,
+      "\n"
+    )
+
+    next
+  }
+
+
+  # Saunders labels
+  trait_label <- switch(
+    trait_raw,
+    AgeSmk = "Age of Smoking Initiation",
+    CigDay = "Cigarettes per Day",
+    DrnkWk = "Drinks per Week",
+    SmkCes = "Smoking Cessation",
+    SmkInit = "Smoking Initiation",
+    NA_character_
+  )
+
+
+  ancestry_label <- switch(
+    ancestry,
+    AFR = "African",
+    AMR = "Admixed American",
+    EAS = "East Asian",
+    EUR = "European",
+    NA_character_
+  )
+
+
+  if (
+    is.na(trait_label) ||
+      is.na(ancestry_label)
+  ) {
+
+    cat(
+      "Skipping because phenotype or ancestry was not recognized.\n"
+    )
+
+    next
+  }
+
+
+  # Match filename phenotype to lead-vector name
+  lead_trait_name <- switch(
+    trait_raw,
+    AgeSmk = "agesmk",
+    CigDay = "cigday",
+    DrnkWk = "drnkwk",
+    SmkCes = "smkcess",
+    SmkInit = "smkinit",
+    NA_character_
+  )
+
+
+  if (is.na(lead_trait_name)) {
+
+    cat(
+      "Skipping unrecognized phenotype:",
+      trait_raw,
+      "\n"
+    )
+
+    next
+  }
+
+
+  lead_vector_name <- paste0(
+    "saunders_",
+    lead_trait_name,
+    "_",
+    tolower(ancestry),
+    "_lead"
+  )
+
+
+  cat(
+    "Expected lead vector:",
+    lead_vector_name,
+    "\n"
+  )
+
+
+  if (!exists(
+    lead_vector_name,
+    inherits = TRUE
+  )) {
+
+    cat(
+      "Skipping because no Saunders lead-SNP vector exists for ",
+      trait_raw,
+      " ",
+      ancestry,
+      ".\n",
+      sep = ""
+    )
+
+    next
+  }
+
+
+  saunders_lead <- get(
+    lead_vector_name,
+    inherits = TRUE
+  )
+
+  saunders_lead <- unique(
+    as.character(saunders_lead)
+  )
+
+  saunders_lead <- saunders_lead[
+    !is.na(saunders_lead) &
+      saunders_lead != ""
+  ]
+
+
+  cat(
+    "Requested Saunders lead SNPs:",
+    length(saunders_lead),
+    "\n"
+  )
+
+
+  if (length(saunders_lead) == 0) {
+
+    cat(
+      "Skipping because the matching lead-SNP vector is empty.\n"
+    )
+
+    next
+  }
+
+
+  # Identify Saunders marker column
+  marker_candidates <- grep(
+    "marker$|^SNP$|^rsid$|^RSID$",
+    names(dat),
+    value = TRUE,
+    ignore.case = TRUE
+  )
+
+  marker_candidates <- setdiff(
+    marker_candidates,
+    "khat_marker"
+  )
+
+
+  if (length(marker_candidates) > 0) {
+
+    comparison_marker <- marker_candidates[1]
+
+    dat[[comparison_marker]] <- as.character(
+      dat[[comparison_marker]]
+    )
+
+    cat(
+      "Saunders marker column:",
+      comparison_marker,
+      "\n"
+    )
+
+  } else {
+
+    comparison_marker <- NULL
+
+    cat(
+      "No separate Saunders marker column detected; ",
+      "using khat_marker only.\n",
+      sep = ""
+    )
+  }
+
+
+  # Keep Saunders lead SNPs
+  if (!is.null(comparison_marker)) {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% saunders_lead |
+        dat[[comparison_marker]] %in% saunders_lead,
+      ,
+      drop = FALSE
+    ]
+
+  } else {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% saunders_lead,
+      ,
+      drop = FALSE
+    ]
+  }
+
+
+  cat(
+    "Lead SNP rows found:",
+    nrow(dat_lead),
+    "\n"
+  )
+
+
+  # Retain rows with both beta estimates
+  dat_lead <- dat_lead[
+    !is.na(dat_lead[[x_beta]]) &
+      !is.na(dat_lead[[y_beta]]) &
+      is.finite(dat_lead[[x_beta]]) &
+      is.finite(dat_lead[[y_beta]]),
+    ,
+    drop = FALSE
+  ]
+
+
+  if (nrow(dat_lead) == 0) {
+
+    cat(
+      "Skipping because no complete Saunders lead SNPs were found.\n"
+    )
+
+    next
+  }
+
+
+  # Reconstruct signed KU/KUF Z-score and standard error
+  #
+  # Z  = sign(beta) * |Phi^(-1)(p / 2)|
+  # SE = beta / Z
+  dat_lead$z_khat <- ifelse(
+    !is.na(dat_lead[[x_beta]]) &
+      is.finite(dat_lead[[x_beta]]) &
+      !is.na(dat_lead[[x_p]]) &
+      is.finite(dat_lead[[x_p]]) &
+      dat_lead[[x_p]] > 0 &
+      dat_lead[[x_p]] < 1 &
+      dat_lead[[x_beta]] != 0,
+
+    sign(dat_lead[[x_beta]]) *
+      abs(qnorm(dat_lead[[x_p]] / 2)),
+
+    NA_real_
+  )
+
+
+  dat_lead$se_khat <- ifelse(
+    !is.na(dat_lead$z_khat) &
+      is.finite(dat_lead$z_khat) &
+      dat_lead$z_khat != 0,
+
+    dat_lead[[x_beta]] /
+      dat_lead$z_khat,
+
+    NA_real_
+  )
+
+
+  # Obtain Saunders SE.
+  
+  # Prefer a reported SE column when exactly one is found.
+  # Otherwise reconstruct SE from Saunders beta and p-value.
+  if (length(y_se_candidates) == 1) {
+
+    y_se <- y_se_candidates[1]
+
+    dat_lead[[y_se]] <- suppressWarnings(
+      as.numeric(dat_lead[[y_se]])
+    )
+
+    dat_lead$se_saunders <- abs(
+      dat_lead[[y_se]]
+    )
+
+    saunders_se_source <- paste0(
+      "reported SE column ",
+      y_se
+    )
+
+  } else if (length(y_p) == 1) {
+
+    dat_lead[[y_p]] <- suppressWarnings(
+      as.numeric(dat_lead[[y_p]])
+    )
+
+    dat_lead$z_saunders <- ifelse(
+      !is.na(dat_lead[[y_beta]]) &
+        is.finite(dat_lead[[y_beta]]) &
+        !is.na(dat_lead[[y_p]]) &
+        is.finite(dat_lead[[y_p]]) &
+        dat_lead[[y_p]] > 0 &
+        dat_lead[[y_p]] < 1 &
+        dat_lead[[y_beta]] != 0,
+
+      sign(dat_lead[[y_beta]]) *
+        abs(qnorm(dat_lead[[y_p]] / 2)),
+
+      NA_real_
+    )
+
+
+    dat_lead$se_saunders <- ifelse(
+      !is.na(dat_lead$z_saunders) &
+        is.finite(dat_lead$z_saunders) &
+        dat_lead$z_saunders != 0,
+
+      dat_lead[[y_beta]] /
+        dat_lead$z_saunders,
+
+      NA_real_
+    )
+
+    saunders_se_source <- paste0(
+      "reconstructed from p-value column ",
+      y_p
+    )
+
+  } else {
+
+    dat_lead$se_saunders <- NA_real_
+    saunders_se_source <- "unavailable"
+  }
+
+
+  cat(
+    "Saunders SE source:",
+    saunders_se_source,
+    "\n"
+  )
+
+
+  # Keep variants with usable beta and SE values
+  dat_lead <- dat_lead[
+    !is.na(dat_lead$se_khat) &
+      !is.na(dat_lead$se_saunders) &
+      is.finite(dat_lead$se_khat) &
+      is.finite(dat_lead$se_saunders) &
+      dat_lead$se_khat >= 0 &
+      dat_lead$se_saunders >= 0,
+    ,
+    drop = FALSE
+  ]
+
+
+  cat(
+    "Lead SNP rows with usable SEs:",
+    nrow(dat_lead),
+    "\n"
+  )
+
+
+  if (nrow(dat_lead) == 0) {
+
+    cat(
+      "Skipping because no lead SNPs had usable KU/KUF and Saunders SEs.\n"
+    )
+
+    next
+  }
+
+
+  # Orient KU/KUF beta positively.
+  #
+  # Flip both aligned beta estimates.
+  # Do not flip standard errors.
+  flip_rows <- dat_lead[[x_beta]] < 0
+
+
+  cat(
+    "Lead SNP rows flipped:",
+    sum(flip_rows, na.rm = TRUE),
+    "\n"
+  )
+
+
+  dat_lead[[x_beta]][flip_rows] <-
+    -dat_lead[[x_beta]][flip_rows]
+
+  dat_lead[[y_beta]][flip_rows] <-
+    -dat_lead[[y_beta]][flip_rows]
+
+
+  # Calculate 95% confidence intervals
+  dat_lead$x_ci_lower <-
+    dat_lead[[x_beta]] -
+    1.96 * dat_lead$se_khat
+
+  dat_lead$x_ci_upper <-
+    dat_lead[[x_beta]] +
+    1.96 * dat_lead$se_khat
+
+  dat_lead$y_ci_lower <-
+    dat_lead[[y_beta]] -
+    1.96 * dat_lead$se_saunders
+
+  dat_lead$y_ci_upper <-
+    dat_lead[[y_beta]] +
+    1.96 * dat_lead$se_saunders
+
+
+  # Highlight KU/KUF P < 1e-5
+  dat_lead$highlight <-
+    !is.na(dat_lead[[x_p]]) &
+      is.finite(dat_lead[[x_p]]) &
+      dat_lead[[x_p]] < ku_sug_thresh
+
+
+  # Create marker labels
+  if (!is.null(comparison_marker)) {
+
+    dat_lead$plot_marker <- ifelse(
+      !is.na(dat_lead[[comparison_marker]]) &
+        dat_lead[[comparison_marker]] != "",
+      dat_lead[[comparison_marker]],
+      dat_lead$khat_marker
+    )
+
+  } else {
+
+    dat_lead$plot_marker <-
+      dat_lead$khat_marker
+  }
+
+
+  # Saunders sample size
+  saunders_n <- dplyr::case_when(
+    trait_raw == "SmkInit" & ancestry == "EUR" ~ 805431,
+    trait_raw == "SmkInit" & ancestry == "AMR" ~ 286026,
+    trait_raw == "SmkInit" & ancestry == "AFR" ~ 119589,
+    trait_raw == "SmkInit" & ancestry == "EAS" ~ 296395,
+
+    trait_raw == "AgeSmk" & ancestry == "EUR" ~ 323836,
+    trait_raw == "AgeSmk" & ancestry == "AMR" ~ 33914,
+    trait_raw == "AgeSmk" & ancestry == "AFR" ~ 17508,
+    trait_raw == "AgeSmk" & ancestry == "EAS" ~ 63353,
+
+    trait_raw == "CigDay" & ancestry == "EUR" ~ 326497,
+    trait_raw == "CigDay" & ancestry == "AMR" ~ 35129,
+    trait_raw == "CigDay" & ancestry == "AFR" ~ 20157,
+    trait_raw == "CigDay" & ancestry == "EAS" ~ 108275,
+
+    trait_raw == "SmkCes" & ancestry == "EUR" ~ 388313,
+    trait_raw == "SmkCes" & ancestry == "AMR" ~ 90525,
+    trait_raw == "SmkCes" & ancestry == "AFR" ~ 34970,
+    trait_raw == "SmkCes" & ancestry == "EAS" ~ 121859,
+
+    trait_raw == "DrnkWk" & ancestry == "EUR" ~ 666978,
+    trait_raw == "DrnkWk" & ancestry == "AMR" ~ 274707,
+    trait_raw == "DrnkWk" & ancestry == "AFR" ~ 95343,
+    trait_raw == "DrnkWk" & ancestry == "EAS" ~ 160775,
+
+    TRUE ~ NA_real_
+  )
+
+
+  saunders_n_label <- if (!is.na(saunders_n)) {
+
+    paste0(
+      trait_label,
+      " ",
+      ancestry,
+      " N = ",
+      format(
+        saunders_n,
+        big.mark = ",",
+        scientific = FALSE,
+        trim = TRUE
+      )
+    )
+
+  } else {
+
+    paste0(
+      trait_label,
+      " ",
+      ancestry,
+      " N = NA"
+    )
+  }
+
+
+  saunders_label <- paste0(
+    "Saunders ",
+    trait_label,
+    " ",
+    ancestry_label
+  )
+
+
+  # Figure 1:
+  # Plot every available lead SNP
+  plot_dat_all <- dat_lead
+
+
+  cat(
+    "Plotting all complete lead SNPs:",
+    nrow(plot_dat_all),
+    "\n"
+  )
+
+
+  make_saunders_plot(
+    plot_dat = plot_dat_all,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_p = x_p,
+    khat_trait = khat_trait,
+    khat_n_label = khat_n_label,
+    trait_label = trait_label,
+    saunders_label = saunders_label,
+    saunders_n_label = saunders_n_label,
+    saunders_se_source = saunders_se_source,
+    filter_label = NULL
+  )
+
+
+  # Figure 2:
+  # For Smoking Initiation only, plot again after
+  # requiring KU/KUF P < 0.05.
+  if (trait_raw == "SmkInit") {
+
+    plot_dat_p05 <- dat_lead[
+      !is.na(dat_lead[[x_p]]) &
+        is.finite(dat_lead[[x_p]]) &
+        dat_lead[[x_p]] > 0 &
+        dat_lead[[x_p]] < 0.05,
+      ,
+      drop = FALSE
+    ]
+
+
+    cat(
+      "Smoking Initiation lead SNPs with KU/KUF P < 0.05:",
+      nrow(plot_dat_p05),
+      "\n"
+    )
+
+
+    if (nrow(plot_dat_p05) == 0) {
+
+      cat(
+        "No Smoking Initiation lead SNPs had KU/KUF P < 0.05; ",
+        "the filtered figure was not created.\n",
+        sep = ""
+      )
+
+    } else {
+
+      make_saunders_plot(
+        plot_dat = plot_dat_p05,
+        x_beta = x_beta,
+        y_beta = y_beta,
+        x_p = x_p,
+        khat_trait = khat_trait,
+        khat_n_label = khat_n_label,
+        trait_label = trait_label,
+        saunders_label = saunders_label,
+        saunders_n_label = saunders_n_label,
+        saunders_se_source = saunders_se_source,
+        filter_label = "with P < 0.05"
+      )
+    }
+  }
+}
+```
+
+
+
+
+```{r}
+# Lead vars for Walters: Alcohol Dependence
+
+walters_lead <- c("rs7644567", "rs2066702", "rs1229984","rs1789912", "rs6827898")
+# p<5*1e-8
+```
+
+```{r}
+# Walters: plot all available Alcohol Dependence lead SNPs
+# with 95% confidence intervals
+
+# Horizontal error bars:
+#   KU/KUF 95% confidence intervals
+
+# Vertical error bars:
+#   Walters Alcohol Dependence 95% confidence intervals
+
+# Red points:
+#   KU/KUF P < 1e-5
+
+# No KU/KUF P < 0.05 filter is applied.
+
+
+
+# Walters input files
+walters_dir <- "/Users/nico/work/sud/walters_lifted_harmonized"
+
+files <- list.files(
+  path = walters_dir,
+  pattern = "^(ku|kuf)_pgc_alcdep_trans_fe_unrel_geno_harmonized\\.txt$",
+  full.names = TRUE
+)
+
+files <- sort(files)
+
+
+cat(
+  "Walters files found:",
+  length(files),
+  "\n"
+)
+
+print(
+  basename(files)
+)
+
+
+if (length(files) == 0) {
+
+  stop(
+    "No Walters harmonized files were found in: ",
+    walters_dir
+  )
+}
+
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE,
+    quote = "",
+    comment.char = ""
+  )
+
+
+  # Identify required KU/KUF and Walters beta columns
+  x_beta <- grep(
+    "^beta_ku$|^beta_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+  y_beta <- grep(
+    "_to_khat_A1$",
+    names(dat),
+    value = TRUE
+  )
+
+  x_p <- grep(
+    "^p_ku$|^p_kuf$",
+    names(dat),
+    value = TRUE
+  )
+
+
+  cat(
+    "x_beta:",
+    paste(x_beta, collapse = ", "),
+    "\n"
+  )
+
+  cat(
+    "y_beta:",
+    paste(y_beta, collapse = ", "),
+    "\n"
+  )
+
+  cat(
+    "x_p:",
+    paste(x_p, collapse = ", "),
+    "\n"
+  )
+
+
+  if (
+    length(x_beta) != 1 ||
+      length(y_beta) != 1 ||
+      length(x_p) != 1 ||
+      !("khat_marker" %in% names(dat))
+  ) {
+
+    cat(
+      "Skipping because required columns were not identified.\n"
+    )
+
+    print(names(dat))
+    next
+  }
+
+
+  # Identify Walters p-value column.
+  
+  # Prefer an exact P column when present.
+  # Otherwise search common p-value column names and
+  # exclude the KU/KUF p-value column.
+  if ("P" %in% names(dat)) {
+
+    y_p <- "P"
+
+  } else {
+
+    y_p_candidates <- grep(
+      "^p$|^pval$|^p_value$|^pvalue$|pval|p_value|pvalue",
+      names(dat),
+      value = TRUE,
+      ignore.case = TRUE
+    )
+
+    y_p_candidates <- setdiff(
+      y_p_candidates,
+      x_p
+    )
+
+    if (length(y_p_candidates) >= 1) {
+
+      y_p <- y_p_candidates[1]
+
+    } else {
+
+      y_p <- character(0)
+    }
+  }
+
+
+  # Search for a reported Walters SE column.
+  
+  # Exclude any SE column that appears to belong to KU/KUF.
+  y_se_candidates <- grep(
+    "^SE$|^se$|stderr|std_err|standard_error",
+    names(dat),
+    value = TRUE,
+    ignore.case = TRUE
+  )
+
+  y_se_candidates <- y_se_candidates[
+    !grepl(
+      "ku|kuf|khat",
+      y_se_candidates,
+      ignore.case = TRUE
+    )
+  ]
+
+
+  cat(
+    "Walters p-value candidate:",
+    paste(y_p, collapse = ", "),
+    "\n"
+  )
+
+  cat(
+    "Walters SE candidates:",
+    paste(y_se_candidates, collapse = ", "),
+    "\n"
+  )
+
+
+  # Convert required columns to numeric
+  dat[[x_beta]] <- suppressWarnings(
+    as.numeric(dat[[x_beta]])
+  )
+
+  dat[[y_beta]] <- suppressWarnings(
+    as.numeric(dat[[y_beta]])
+  )
+
+  dat[[x_p]] <- suppressWarnings(
+    as.numeric(dat[[x_p]])
+  )
+
+  dat$khat_marker <- as.character(
+    dat$khat_marker
+  )
+
+
+  # Identify Walters marker column
+  marker_candidates <- grep(
+    "marker$|^SNP$|^rsid$|^RSID$",
+    names(dat),
+    value = TRUE,
+    ignore.case = TRUE
+  )
+
+  marker_candidates <- setdiff(
+    marker_candidates,
+    "khat_marker"
+  )
+
+
+  if (length(marker_candidates) > 0) {
+
+    walters_marker <- marker_candidates[1]
+
+    dat[[walters_marker]] <- as.character(
+      dat[[walters_marker]]
+    )
+
+    cat(
+      "Walters marker column:",
+      walters_marker,
+      "\n"
+    )
+
+  } else {
+
+    walters_marker <- NULL
+
+    cat(
+      "No separate Walters marker column detected; ",
+      "using khat_marker only.\n",
+      sep = ""
+    )
+  }
+
+
+  # Keep only Walters lead SNPs
+  if (!is.null(walters_marker)) {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% walters_lead |
+        dat[[walters_marker]] %in% walters_lead,
+      ,
+      drop = FALSE
+    ]
+
+  } else {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% walters_lead,
+      ,
+      drop = FALSE
+    ]
+  }
+
+
+  cat(
+    "Requested Walters lead SNPs:",
+    length(walters_lead),
+    "\n"
+  )
+
+  cat(
+    "Lead SNP rows found:",
+    nrow(dat_lead),
+    "\n"
+  )
+
+
+  # Identify found and missing lead SNPs
+  found_leads <- dat_lead$khat_marker[
+    dat_lead$khat_marker %in% walters_lead
+  ]
+
+
+  if (!is.null(walters_marker)) {
+
+    found_leads <- c(
+      found_leads,
+      dat_lead[[walters_marker]][
+        dat_lead[[walters_marker]] %in% walters_lead
+      ]
+    )
+  }
+
+
+  found_leads <- unique(
+    found_leads[
+      !is.na(found_leads) &
+        found_leads != ""
+    ]
+  )
+
+  missing_leads <- setdiff(
+    walters_lead,
+    found_leads
+  )
+
+
+  cat(
+    "Lead SNPs found:",
+    if (length(found_leads) > 0) {
+      paste(found_leads, collapse = ", ")
+    } else {
+      "none"
+    },
+    "\n"
+  )
+
+
+  if (length(missing_leads) > 0) {
+
+    cat(
+      "Lead SNPs missing:",
+      paste(missing_leads, collapse = ", "),
+      "\n"
+    )
+  }
+
+
+  # Keep rows with both beta estimates.
+  
+  # A valid KU/KUF p-value will be required later to
+  # reconstruct the KU/KUF standard error.
+  dat_lead <- dat_lead[
+    !is.na(dat_lead[[x_beta]]) &
+      !is.na(dat_lead[[y_beta]]) &
+      is.finite(dat_lead[[x_beta]]) &
+      is.finite(dat_lead[[y_beta]]),
+    ,
+    drop = FALSE
+  ]
+
+
+  if (nrow(dat_lead) == 0) {
+
+    cat(
+      "Skipping because no complete Walters lead SNPs were found.\n"
+    )
+
+    next
+  }
+
+
+
+  # Reconstruct signed KU/KUF Z-score and standard error
+  #
+  # Z  = sign(beta) * |Phi^(-1)(p / 2)|
+  # SE = beta / Z
+
+  dat_lead$z_khat <- ifelse(
+    !is.na(dat_lead[[x_beta]]) &
+      is.finite(dat_lead[[x_beta]]) &
+      !is.na(dat_lead[[x_p]]) &
+      is.finite(dat_lead[[x_p]]) &
+      dat_lead[[x_p]] > 0 &
+      dat_lead[[x_p]] < 1 &
+      dat_lead[[x_beta]] != 0,
+
+    sign(dat_lead[[x_beta]]) *
+      abs(qnorm(dat_lead[[x_p]] / 2)),
+
+    NA_real_
+  )
+
+
+  dat_lead$se_khat <- ifelse(
+    !is.na(dat_lead$z_khat) &
+      is.finite(dat_lead$z_khat) &
+      dat_lead$z_khat != 0,
+
+    dat_lead[[x_beta]] /
+      dat_lead$z_khat,
+
+    NA_real_
+  )
+
+
+
+  # Obtain Walters standard errors
+
+ 
+  # Prefer a reported Walters SE column when exactly one
+  # suitable column is available.
+  
+  # Otherwise reconstruct the Walters SE from the Walters
+  # beta and two-sided p-value.
+
+  if (length(y_se_candidates) == 1) {
+
+    y_se <- y_se_candidates[1]
+
+    dat_lead[[y_se]] <- suppressWarnings(
+      as.numeric(dat_lead[[y_se]])
+    )
+
+    dat_lead$se_walters <- abs(
+      dat_lead[[y_se]]
+    )
+
+    walters_se_source <- paste0(
+      "reported SE column ",
+      y_se
+    )
+
+  } else if (length(y_p) == 1) {
+
+    dat_lead[[y_p]] <- suppressWarnings(
+      as.numeric(dat_lead[[y_p]])
+    )
+
+
+    dat_lead$z_walters <- ifelse(
+      !is.na(dat_lead[[y_beta]]) &
+        is.finite(dat_lead[[y_beta]]) &
+        !is.na(dat_lead[[y_p]]) &
+        is.finite(dat_lead[[y_p]]) &
+        dat_lead[[y_p]] > 0 &
+        dat_lead[[y_p]] < 1 &
+        dat_lead[[y_beta]] != 0,
+
+      sign(dat_lead[[y_beta]]) *
+        abs(qnorm(dat_lead[[y_p]] / 2)),
+
+      NA_real_
+    )
+
+
+    dat_lead$se_walters <- ifelse(
+      !is.na(dat_lead$z_walters) &
+        is.finite(dat_lead$z_walters) &
+        dat_lead$z_walters != 0,
+
+      dat_lead[[y_beta]] /
+        dat_lead$z_walters,
+
+      NA_real_
+    )
+
+    walters_se_source <- paste0(
+      "reconstructed from p-value column ",
+      y_p
+    )
+
+  } else {
+
+    dat_lead$se_walters <- NA_real_
+    walters_se_source <- "unavailable"
+  }
+
+
+  cat(
+    "Walters SE source:",
+    walters_se_source,
+    "\n"
+  )
+
+
+  # Keep variants with usable KU/KUF and Walters SE values
+  dat_lead <- dat_lead[
+    !is.na(dat_lead$se_khat) &
+      !is.na(dat_lead$se_walters) &
+      is.finite(dat_lead$se_khat) &
+      is.finite(dat_lead$se_walters) &
+      dat_lead$se_khat >= 0 &
+      dat_lead$se_walters >= 0,
+    ,
+    drop = FALSE
+  ]
+
+
+  cat(
+    "Lead SNP rows with usable SEs:",
+    nrow(dat_lead),
+    "\n"
+  )
+
+
+  if (nrow(dat_lead) == 0) {
+
+    cat(
+      "Skipping because no Walters lead SNPs had usable ",
+      "KU/KUF and Walters SE values.\n",
+      sep = ""
+    )
+
+    next
+  }
+
+
+  # Orient KU/KUF beta positively.
+  #
+  # Flip both aligned beta estimates together.
+  # Standard errors are not flipped.
+  flip_rows <- dat_lead[[x_beta]] < 0
+
+
+  cat(
+    "Lead SNP rows flipped:",
+    sum(flip_rows, na.rm = TRUE),
+    "\n"
+  )
+
+
+  dat_lead[[x_beta]][flip_rows] <-
+    -dat_lead[[x_beta]][flip_rows]
+
+  dat_lead[[y_beta]][flip_rows] <-
+    -dat_lead[[y_beta]][flip_rows]
+
+
+  # Calculate 95% confidence intervals
+  dat_lead$x_ci_lower <-
+    dat_lead[[x_beta]] -
+    1.96 * dat_lead$se_khat
+
+  dat_lead$x_ci_upper <-
+    dat_lead[[x_beta]] +
+    1.96 * dat_lead$se_khat
+
+  dat_lead$y_ci_lower <-
+    dat_lead[[y_beta]] -
+    1.96 * dat_lead$se_walters
+
+  dat_lead$y_ci_upper <-
+    dat_lead[[y_beta]] +
+    1.96 * dat_lead$se_walters
+
+
+  # Highlight KU/KUF P < 1e-5
+  dat_lead$highlight <-
+    !is.na(dat_lead[[x_p]]) &
+      is.finite(dat_lead[[x_p]]) &
+      dat_lead[[x_p]] < ku_sug_thresh
+
+
+  # Create marker labels
+  if (!is.null(walters_marker)) {
+
+    dat_lead$plot_marker <- ifelse(
+      !is.na(dat_lead[[walters_marker]]) &
+        dat_lead[[walters_marker]] != "",
+      dat_lead[[walters_marker]],
+      dat_lead$khat_marker
+    )
+
+  } else {
+
+    dat_lead$plot_marker <-
+      dat_lead$khat_marker
+  }
+
+
+  plot_dat <- dat_lead
+
+
+  cat(
+    "Complete lead SNP rows plotted:",
+    nrow(plot_dat),
+    "\n"
+  )
+
+  cat(
+    "Lead SNPs highlighted at P < ",
+    ku_sug_thresh,
+    ": ",
+    sum(plot_dat$highlight, na.rm = TRUE),
+    "\n",
+    sep = ""
+  )
+
+
+  # Plot labels
+  pair_name <- tools::file_path_sans_ext(
+    basename(file)
+  )
+
+
+  if (grepl("^ku_", pair_name)) {
+
+    khat_trait <- "Khat Use"
+    khat_n_label <- "KU N = 33,210"
+
+  } else {
+
+    khat_trait <- "Khat Use Frequency"
+    khat_n_label <- "KUF N = 25,869"
+  }
+
+
+  walters_label <- "Walters Alcohol Dependence"
+  alcdep_n_label <- "ALCDep N = 52,848"
+
+
+
+  # Count plotted variants with nominal KU/KUF association (P < 0.05)
+  khat_p05_count <- sum(
+    !is.na(plot_dat[[x_p]]) &
+      is.finite(plot_dat[[x_p]]) &
+      plot_dat[[x_p]] < 0.05
+  )
+
+  cat(
+    khat_trait,
+    " variants with P < 0.05:",
+    khat_p05_count,
+    "\n"
+  )
+
+  # Pearson correlation among all plotted lead SNPs
+  if (
+    nrow(plot_dat) >= 3 &&
+      length(unique(plot_dat[[x_beta]])) >= 2 &&
+      length(unique(plot_dat[[y_beta]])) >= 2
+  ) {
+
+    pearson_test <- cor.test(
+      plot_dat[[x_beta]],
+      plot_dat[[y_beta]],
+      method = "pearson"
+    )
+
+    pearson_r <- unname(
+      pearson_test$estimate
+    )
+
+    pearson_p <- pearson_test$p.value
+
+
+    title_correlation <- paste0(
+      " | r = ",
+      round(
+        pearson_r,
+        4
+      )
+    )
+
+
+    correlation_label <- paste0(
+      "Pearson p = ",
+      format.pval(
+        pearson_p,
+        digits = 3,
+        eps = 1e-300
+      )
+    )
+
+  } else {
+
+    title_correlation <- ""
+
+
+    correlation_label <- paste0(
+      "Pearson correlation not calculated; ",
+      nrow(plot_dat),
+      " complete lead SNP",
+      ifelse(
+        nrow(plot_dat) == 1,
+        "",
+        "s"
+      ),
+      " available"
+    )
+  }
+
+
+  # Create plot
+  # Generalized Deming regression
+  deming_results <- get_deming_results(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_se = "se_khat",
+    y_se = "se_walters"
+  )
+
+  add_comparison_summary(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_p = x_p,
+    khat_trait = khat_trait,
+    comparison_label = walters_label,
+    deming_results = deming_results
+  )
+
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+
+    # Horizontal KU/KUF 95% confidence intervals
+    geom_errorbar(
+      aes(
+        xmin = x_ci_lower,
+        xmax = x_ci_upper
+      ),
+      orientation = "y",
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Vertical Walters 95% confidence intervals
+    geom_errorbar(
+      aes(
+        ymin = y_ci_lower,
+        ymax = y_ci_upper
+      ),
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # Plot every available Walters lead SNP
+    geom_point(
+      alpha = 0.6,
+      size = 3
+    ) +
+
+    # Ordinary least-squares line of best fit
+    {
+      if (
+        nrow(plot_dat) >= 2 &&
+          length(unique(plot_dat[[x_beta]])) >= 2
+      ) {
+
+        geom_smooth(
+          method = "lm",
+          formula = y ~ x,
+          se = FALSE,
+          color = "blue",
+          linetype = "dashed",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Generalized Deming regression line
+    {
+      if (
+        is.finite(deming_results$intercept) &&
+          is.finite(deming_results$slope)
+      ) {
+
+        geom_abline(
+          intercept = deming_results$intercept,
+          slope = deming_results$slope,
+          color = "blue",
+          linetype = "solid",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Highlight KU/KUF P < 1e-5
+    geom_point(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      color = "red",
+      size = 3.5
+    ) +
+
+    # Label only highlighted SNPs
+    geom_text_repel(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      aes(
+        label = plot_marker
+      ),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+
+    geom_hline(
+      yintercept = 0
+    ) +
+
+    geom_vline(
+      xintercept = 0
+    ) +
+
+    theme_bw() +
+
+    theme(
+      plot.title = element_text(
+        size = 10
+      ),
+      plot.subtitle = element_text(
+        size = 5.5
+      )
+    ) +
+
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x ",
+        walters_label,
+        " Lead SNPs",
+        title_correlation
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        alcdep_n_label,
+        " | Lead SNPs plotted = ",
+        nrow(plot_dat),
+        " | Error bars = 95% CIs",
+        " | ",
+        deming_results$label,
+        " | ",
+        correlation_label
+      ),
+      x = paste0(
+        khat_trait,
+        " beta"
+      ),
+      y = paste0(
+        walters_label,
+        " beta"
+      )
+    )
+
+
+  print(p)
+}
+```
+
+
+### Bright 2026 CanLU: EUR and cross-ancestry lead SNP comparisons
+
+```{r}
+# Bright 2026 CanLU: setup and lead-SNP definitions
+#
+# EUR harmonized files contain CanLU beta + SE and therefore use the same
+# beta/95% CI/Deming workflow as the other primary comparisons.
+#
+# Cross-ancestry harmonized files contain a harmonized CanLU Z-score but no
+# beta or SE. Those comparisons are therefore plotted as signed Z-score vs
+# signed Z-score and are not added to the beta/Deming comparison_summary.
+
+bright_data_dir <- "/Users/nico/work/sud/bright_harmonized"
+
+ku_sug_thresh <- 1e-5
+
+bright_files <- list.files(
+  path = bright_data_dir,
+  pattern = paste0(
+    "^(ku|kuf)_canlu_",
+    "(eur|cross_ancestry)_harmonized\\.txt$"
+  ),
+  full.names = TRUE
+)
+
+cat("Bright files found:", length(bright_files), "\n")
+print(basename(bright_files))
+
+
+# EUR meta-analysis genome-wide significant lead variants
+bright_eur_lead <- c(
+  "rs858931",
+  "rs1446710",
+  "rs7609594",
+  "rs861001",
+  "rs16867990",
+  "rs4712084",
+  "rs10883796",
+  "rs9919557",
+  "rs2106480",
+  "rs1788783",
+  "rs2045154"
+)
+
+bright_eur_gene <- c(
+  rs858931 = "NRXN1",
+  rs1446710 = "LRRTM2",
+  rs7609594 = "CADM2",
+  rs861001 = "",
+  rs16867990 = "PCDH7",
+  rs4712084 = "",
+  rs10883796 = "AS3MT",
+  rs9919557 = "NCAM1",
+  rs2106480 = "",
+  rs1788783 = "NPC1",
+  rs2045154 = "DCC"
+)
+
+
+# Multi-ancestry meta-analysis genome-wide significant lead variants
+bright_cross_lead <- c(
+  "rs10754807",
+  "rs11902472",
+  "rs1821351",
+  "rs9858134",
+  "rs1604060",
+  "rs3095075",
+  "rs112738674",
+  "rs9357822",
+  "rs2402870",
+  "rs10883796",
+  "rs10891480",
+  "rs74644204",
+  "rs62034323",
+  "rs4925114",
+  "rs1623003"
+)
+
+bright_cross_gene <- c(
+  rs10754807 = "AKT3",
+  rs11902472 = "LINC01934",
+  rs1821351 = "CADM2",
+  rs9858134 = "",
+  rs1604060 = "",
+  rs3095075 = "MSANTD1",
+  rs112738674 = "LINC02497",
+  rs9357822 = "",
+  rs2402870 = "SND1",
+  rs10883796 = "AS3MT",
+  rs10891480 = "NCAM1",
+  rs74644204 = "PTPN11",
+  rs62034323 = "",
+  rs4925114 = "RAI1",
+  rs1623003 = "NPC1"
+)
+
+
+bright_eur_data <- list()
+bright_cross_data <- list()
+```
+
+
+```{r}
+
+# Bright CanLU: setup and prepare lead-SNP datasets
+
+
+data_dir <- "/Users/nico/work/sud/bright_harmonized"
+
+ku_sug_thresh <- 1e-5
+
+files <- list.files(
+  path = data_dir,
+  pattern = paste0(
+    "^(ku|kuf)_canlu_",
+    "(eur|cross_ancestry)_harmonized\\.txt$"
+  ),
+  full.names = TRUE
+)
+
+cat("Bright files found:", length(files), "\n")
+print(basename(files))
+
+
+# EUR meta-analysis lead SNPs
+bright_eur_lead <- c(
+  "rs858931",
+  "rs1446710",
+  "rs7609594",
+  "rs861001",
+  "rs16867990",
+  "rs4712084",
+  "rs10883796",
+  "rs9919557",
+  "rs2106480",
+  "rs1788783",
+  "rs2045154"
+)
+
+
+# Cross-ancestry meta-analysis lead SNPs
+bright_cross_lead <- c(
+  "rs10754807",
+  "rs11902472",
+  "rs1821351",
+  "rs9858134",
+  "rs1604060",
+  "rs3095075",
+  "rs112738674",
+  "rs9357822",
+  "rs2402870",
+  "rs10883796",
+  "rs10891480",
+  "rs74644204",
+  "rs62034323",
+  "rs4925114",
+  "rs1623003"
+)
+
+
+bright_eur_data <- list()
+bright_cross_data <- list()
+
+
+for (file in files) {
+
+  cat("\nProcessing:", basename(file), "\n")
+
+  dat <- read.table(
+    file,
+    header = TRUE,
+    sep = "\t",
+    fill = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+
+
+  # KU versus KUF
+
+
+  if (grepl("^ku_", basename(file))) {
+
+    khat_beta <- "beta_ku"
+    khat_p <- "p_ku"
+    khat_trait <- "Khat Use"
+
+  } else {
+
+    khat_beta <- "beta_kuf"
+    khat_p <- "p_kuf"
+    khat_trait <- "Khat Use Frequency"
+  }
+
+
+  dat[[khat_beta]] <- as.numeric(
+    dat[[khat_beta]]
+  )
+
+  dat[[khat_p]] <- as.numeric(
+    dat[[khat_p]]
+  )
+
+
+
+  # Reconstruct signed KU/KUF Z-score
+  #
+  # Z = sign(beta) * |qnorm(P / 2)|
+
+
+  dat$z_khat <- ifelse(
+    !is.na(dat[[khat_beta]]) &
+      is.finite(dat[[khat_beta]]) &
+      !is.na(dat[[khat_p]]) &
+      is.finite(dat[[khat_p]]) &
+      dat[[khat_p]] > 0 &
+      dat[[khat_p]] < 1 &
+      dat[[khat_beta]] != 0,
+
+    sign(dat[[khat_beta]]) *
+      abs(qnorm(dat[[khat_p]] / 2)),
+
+    NA_real_
+  )
+
+
+
+  # Reconstruct KU/KUF SE
+  #
+  # SE = beta / Z
+
+
+  dat$se_khat <- ifelse(
+    !is.na(dat$z_khat) &
+      is.finite(dat$z_khat) &
+      dat$z_khat != 0,
+
+    dat[[khat_beta]] /
+      dat$z_khat,
+
+    NA_real_
+  )
+
+
+
+  # EUR meta-analysis
+
+
+  if (grepl(
+    "canlu_eur_harmonized",
+    basename(file)
+  )) {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% bright_eur_lead |
+        dat$rsid %in% bright_eur_lead,
+      ,
+      drop = FALSE
+    ]
+
+
+    cat(
+      "EUR lead SNP rows found:",
+      nrow(dat_lead),
+      "\n"
+    )
+
+
+    if (nrow(dat_lead) == 0) {
+      next
+    }
+
+
+    dat_lead$beta_canlu_to_khat_A1 <-
+      as.numeric(
+        dat_lead$beta_canlu_to_khat_A1
+      )
+
+    dat_lead$canlu_SE <-
+      as.numeric(
+        dat_lead$canlu_SE
+      )
+
+    dat_lead$canlu_P <-
+      as.numeric(
+        dat_lead$canlu_P
+      )
+
+
+    dat_lead$plot_marker <- ifelse(
+      !is.na(dat_lead$rsid) &
+        dat_lead$rsid != "",
+      dat_lead$rsid,
+      dat_lead$khat_marker
+    )
+
+
+    attr(dat_lead, "x_beta") <- khat_beta
+    attr(dat_lead, "x_p") <- khat_p
+    attr(dat_lead, "khat_trait") <- khat_trait
+
+
+    pair_name <- tools::file_path_sans_ext(
+      basename(file)
+    )
+
+    bright_eur_data[[pair_name]] <- dat_lead
+  }
+
+
+  # Cross-ancestry meta-analysis
+ 
+
+  if (grepl(
+    "canlu_cross_ancestry_harmonized",
+    basename(file)
+  )) {
+
+    dat_lead <- dat[
+      dat$khat_marker %in% bright_cross_lead |
+        dat$rsid %in% bright_cross_lead,
+      ,
+      drop = FALSE
+    ]
+
+
+    cat(
+      "Cross-ancestry lead SNP rows found:",
+      nrow(dat_lead),
+      "\n"
+    )
+
+
+    if (nrow(dat_lead) == 0) {
+      next
+    }
+
+
+    dat_lead$z_canlu_to_khat_A1 <-
+      as.numeric(
+        dat_lead$z_canlu_to_khat_A1
+      )
+
+    dat_lead$canlu_P <-
+      as.numeric(
+        dat_lead$canlu_P
+      )
+
+
+    dat_lead$plot_marker <- ifelse(
+      !is.na(dat_lead$rsid) &
+        dat_lead$rsid != "",
+      dat_lead$rsid,
+      dat_lead$khat_marker
+    )
+
+
+    attr(dat_lead, "x_beta") <- khat_beta
+    attr(dat_lead, "x_p") <- khat_p
+    attr(dat_lead, "khat_trait") <- khat_trait
+
+
+    pair_name <- tools::file_path_sans_ext(
+      basename(file)
+    )
+
+    bright_cross_data[[pair_name]] <- dat_lead
+  }
+}
+
+
+cat(
+  "\nEUR datasets prepared:",
+  length(bright_eur_data),
+  "\n"
+)
+
+print(names(bright_eur_data))
+
+cat(
+  "\nCross-ancestry datasets prepared:",
+  length(bright_cross_data),
+  "\n"
+)
+
+print(names(bright_cross_data))
+```
+
+
+```{r}
+
+# Bright CanLU EUR meta-analysis lead-SNP beta comparisons
+
+
+for (pair_name in names(bright_eur_data)) {
+
+  cat("\nPlotting:", pair_name, "\n")
+
+  plot_dat <- bright_eur_data[[pair_name]]
+
+  x_beta <- attr(
+    plot_dat,
+    "x_beta"
+  )
+
+  x_p <- attr(
+    plot_dat,
+    "x_p"
+  )
+
+  khat_trait <- attr(
+    plot_dat,
+    "khat_trait"
+  )
+
+  y_beta <- "beta_canlu_to_khat_A1"
+
+
+
+  # Labels
+
+  if (grepl("^ku_", pair_name)) {
+
+    khat_n_label <- "KU N = 33,210"
+
+  } else {
+
+    khat_n_label <- "KUF N = 25,869"
+  }
+
+  canlu_n_label <- "CanLU EUR effective N = 258,823"
+
+
+
+  # Keep complete beta + SE rows
+
+  plot_dat <- plot_dat[
+    !is.na(plot_dat[[x_beta]]) &
+      !is.na(plot_dat[[y_beta]]) &
+      !is.na(plot_dat$se_khat) &
+      !is.na(plot_dat$canlu_SE) &
+      is.finite(plot_dat[[x_beta]]) &
+      is.finite(plot_dat[[y_beta]]) &
+      is.finite(plot_dat$se_khat) &
+      is.finite(plot_dat$canlu_SE) &
+      plot_dat$se_khat > 0 &
+      plot_dat$canlu_SE > 0,
+    ,
+    drop = FALSE
+  ]
+
+
+  cat(
+    "Complete Bright EUR lead SNPs:",
+    nrow(plot_dat),
+    "\n"
+  )
+
+
+  if (nrow(plot_dat) == 0) {
+
+    cat(
+      "No complete EUR variants; skipping.\n"
+    )
+
+    next
+  }
+
+
+
+  # Orient KU/KUF beta positively
+  #
+  # Both beta estimates are already oriented to khat_A1.
+
+
+  flip_rows <- plot_dat[[x_beta]] < 0
+
+  plot_dat[[x_beta]][flip_rows] <-
+    -plot_dat[[x_beta]][flip_rows]
+
+  plot_dat[[y_beta]][flip_rows] <-
+    -plot_dat[[y_beta]][flip_rows]
+
+
+
+  # 95% confidence intervals
+
+  plot_dat$x_ci_lower <-
+    plot_dat[[x_beta]] -
+    1.96 * plot_dat$se_khat
+
+  plot_dat$x_ci_upper <-
+    plot_dat[[x_beta]] +
+    1.96 * plot_dat$se_khat
+
+
+  plot_dat$y_ci_lower <-
+    plot_dat[[y_beta]] -
+    1.96 * plot_dat$canlu_SE
+
+  plot_dat$y_ci_upper <-
+    plot_dat[[y_beta]] +
+    1.96 * plot_dat$canlu_SE
+
+
+
+  # Highlight Khat P < 1e-5
+
+
+  plot_dat$highlight <-
+    !is.na(plot_dat[[x_p]]) &
+    is.finite(plot_dat[[x_p]]) &
+    plot_dat[[x_p]] < ku_sug_thresh
+
+
+
+  # Pearson correlation
+
+
+  if (
+    nrow(plot_dat) >= 3 &&
+      length(unique(plot_dat[[x_beta]])) >= 2 &&
+      length(unique(plot_dat[[y_beta]])) >= 2
+  ) {
+
+    pearson_test <- cor.test(
+      plot_dat[[x_beta]],
+      plot_dat[[y_beta]],
+      method = "pearson"
+    )
+
+    pearson_r <- unname(
+      pearson_test$estimate
+    )
+
+    pearson_p <- pearson_test$p.value
+
+
+    title_correlation <- paste0(
+      " | r = ",
+      round(pearson_r, 4)
+    )
+
+    correlation_label <- paste0(
+      "Pearson p = ",
+      format.pval(
+        pearson_p,
+        digits = 3,
+        eps = 1e-300
+      )
+    )
+
+  } else {
+
+    title_correlation <- ""
+
+    correlation_label <- paste0(
+      "Pearson correlation not calculated; ",
+      nrow(plot_dat),
+      " complete lead SNPs"
+    )
+  }
+
+
+  # Generalized Deming regression
+
+
+  deming_results <- get_deming_results(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_se = "se_khat",
+    y_se = "canlu_SE"
+  )
+
+
+  # Add EUR comparison to existing summary table
+  add_comparison_summary(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_p = x_p,
+    khat_trait = khat_trait,
+    comparison_label =
+      "Bright CanLU European Meta-analysis",
+    deming_results = deming_results
+  )
+
+
+
+  # Plot
+
+
+  p <- ggplot(
+    plot_dat,
+    aes(
+      x = .data[[x_beta]],
+      y = .data[[y_beta]]
+    )
+  ) +
+
+    # KU/KUF 95% CI
+    geom_errorbar(
+      aes(
+        xmin = x_ci_lower,
+        xmax = x_ci_upper
+      ),
+      orientation = "y",
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    # CanLU 95% CI
+    geom_errorbar(
+      aes(
+        ymin = y_ci_lower,
+        ymax = y_ci_upper
+      ),
+      width = 0,
+      alpha = 0.4,
+      linewidth = 0.5
+    ) +
+
+    geom_point(
+      alpha = 0.6,
+      size = 3
+    ) +
+
+    # Ordinary least-squares line
+    {
+      if (
+        nrow(plot_dat) >= 2 &&
+          length(unique(plot_dat[[x_beta]])) >= 2
+      ) {
+
+        geom_smooth(
+          method = "lm",
+          formula = y ~ x,
+          se = FALSE,
+          color = "blue",
+          linetype = "dashed",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Deming regression line
+    {
+      if (
+        is.finite(deming_results$intercept) &&
+          is.finite(deming_results$slope)
+      ) {
+
+        geom_abline(
+          intercept = deming_results$intercept,
+          slope = deming_results$slope,
+          color = "blue",
+          linetype = "solid",
+          linewidth = 0.8
+        )
+      }
+    } +
+
+    # Highlight Khat P < 1e-5
+    geom_point(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      color = "red",
+      size = 3.5
+    ) +
+
+    # Label highlighted SNPs only
+    geom_text_repel(
+      data = subset(
+        plot_dat,
+        highlight
+      ),
+      aes(
+        label = plot_marker
+      ),
+      color = "red",
+      size = 3,
+      max.overlaps = Inf,
+      box.padding = 0.3,
+      point.padding = 0.2
+    ) +
+
+    geom_hline(
+      yintercept = 0
+    ) +
+
+    geom_vline(
+      xintercept = 0
+    ) +
+
+    theme_bw() +
+
+    theme(
+      plot.title = element_text(
+        size = 10
+      ),
+      plot.subtitle = element_text(
+        size = 6
+      )
+    ) +
+
+    labs(
+      title = paste0(
+        "NGAP: ",
+        khat_trait,
+        " x Bright CanLU European Meta-analysis Lead SNPs",
+        title_correlation
+      ),
+      subtitle = paste0(
+        khat_n_label,
+        " | ",
+        canlu_n_label,
+        " | Lead SNPs plotted = ",
+        nrow(plot_dat),
+        " | Error bars = 95% CIs",
+        " | ",
+        deming_results$label,
+        " | ",
+        correlation_label
+      ),
+      x = paste0(
+        khat_trait,
+        " beta"
+      ),
+      y = "CanLU European meta-analysis beta"
+    )
+
+  print(p)
+}
+```
+
+
+
+
+### Comparison summary table
+```{r}
+# Add Liu Smoking Initiation KU/KUF P < 0.05 comparisons
+# to the end of comparison_summary
+
+smkinit_names <- names(liu_lead_data)[
+  grepl(
+    "SmokingInitiation",
+    names(liu_lead_data),
+    fixed = TRUE
+  )
+]
+
+for (pair_name in smkinit_names) {
+
+  plot_dat <- liu_lead_data[[pair_name]]
+
+  # Retrieve stored column names
+  x_beta <- attr(plot_dat, "x_beta")
+  x_p <- attr(plot_dat, "x_p")
+  y_beta <- attr(plot_dat, "y_beta")
+
+  # Identify KU versus KUF
+  if (grepl("^ku_", pair_name)) {
+
+    khat_trait <- "Khat Use"
+    filter_label <- "KU pval < 0.05"
+
+  } else {
+
+    khat_trait <- "Khat Use Frequency"
+    filter_label <- "KUF pval < 0.05"
+  }
+
+  # Keep the same complete rows used in the Liu plots,
+  # additionally requiring KU/KUF P < 0.05
+  plot_dat <- plot_dat[
+    !is.na(plot_dat[[x_beta]]) &
+      !is.na(plot_dat[[y_beta]]) &
+      !is.na(plot_dat[[x_p]]) &
+      !is.na(plot_dat$se_khat) &
+      !is.na(plot_dat$se_liu) &
+      is.finite(plot_dat[[x_beta]]) &
+      is.finite(plot_dat[[y_beta]]) &
+      is.finite(plot_dat[[x_p]]) &
+      is.finite(plot_dat$se_khat) &
+      is.finite(plot_dat$se_liu) &
+      plot_dat[[x_p]] > 0 &
+      plot_dat[[x_p]] < 0.05 &
+      plot_dat$se_khat >= 0 &
+      plot_dat$se_liu >= 0,
+    ,
+    drop = FALSE
+  ]
+
+  if (nrow(plot_dat) == 0) {
+    next
+  }
+
+  # Use the same positive-KU/KUF orientation as the Liu plots
+  flip_rows <- plot_dat[[x_beta]] < 0
+
+  plot_dat[[x_beta]][flip_rows] <-
+    -plot_dat[[x_beta]][flip_rows]
+
+  plot_dat[[y_beta]][flip_rows] <-
+    -plot_dat[[y_beta]][flip_rows]
+
+  # Recalculate Deming regression for the filtered comparison
+  deming_results <- get_deming_results(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_se = "se_khat",
+    y_se = "se_liu"
+  )
+
+  # Append the filtered comparison row
+  add_comparison_summary(
+    plot_dat = plot_dat,
+    x_beta = x_beta,
+    y_beta = y_beta,
+    x_p = x_p,
+    khat_trait = khat_trait,
+    comparison_label = paste0(
+      "Liu Smoking Initiation | ",
+      filter_label
+    ),
+    deming_results = deming_results
+  )
+}
+```
+
+
+```{r}
+# Final table containing one row per primary comparison.
+# For Liu Smoking Initiation, the summary uses all usable lead SNPs from the
+# main Liu comparison cell, not the separate KU/KUF P < 0.05-only visualization.
+# Therefore, "Number of Variants in Comparison" is the full usable denominator,
+# while the final column is the subset with KU/KUF P < 0.05.
+# Raw numeric values are retained in comparison_summary.
+comparison_summary_display <- comparison_summary %>%
+  mutate(
+    `Pearson Correlation` = round(`Pearson Correlation`, 4),
+    `Pearson Pvalue` = ifelse(
+      is.na(`Pearson Pvalue`),
+      NA_character_,
+      format.pval(`Pearson Pvalue`, digits = 3, eps = 1e-300)
+    ),
+    `Deming Slope` = round(`Deming Slope`, 4),
+    `Deming Pvalue` = ifelse(
+      is.na(`Deming Pvalue`),
+      NA_character_,
+      format.pval(`Deming Pvalue`, digits = 3, eps = 1e-300)
+    )
+  )
+
+# Print to the R console
+print(comparison_summary_display)
+
+# Render as a table in the knitted HTML document
+knitr::kable(
+  comparison_summary_display,
+  align = c("l", "l", "r", "r", "r", "r", "r", "r"),
+  caption = NULL
+)
+```

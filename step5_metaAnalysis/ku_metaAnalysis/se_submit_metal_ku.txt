@@ -1,0 +1,25 @@
+SCHEME STDERR
+
+SEPARATOR TAB
+COLUMNCOUNTING LENIENT
+
+MARKER MarkerID
+ALLELE Allele2 Allele1
+EFFECT BETA
+STDERR SE
+PVALUE p.value
+WEIGHT N
+AVERAGEFREQ ON
+MINMAXFREQ ON
+FREQLABEL AF_Allele2
+
+PROCESS metal_ready_gp08_KEMRI_assist_khat_saige_assoc_allchr.txt
+PROCESS metal_ready_gp08_AAU_assist_khat_saige_assoc_allchr.txt
+PROCESS metal_ready_gp08_Moi_assist_khat_saige_assoc_allchr.txt
+PROCESS metal_ready_gp08_UCT_assist_khat_saige_assoc_allchr.txt
+PROCESS metal_ready_gp08_Uganda_assist_khat_saige_assoc_allchr.txt
+
+OUTFILE se_metal_ku_all_sites .tbl
+
+ANALYZE
+QUIT

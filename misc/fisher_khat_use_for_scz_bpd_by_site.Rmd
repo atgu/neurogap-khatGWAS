@@ -1,0 +1,285 @@
+---
+title: "fisher_khat_use_for_scz_bpd_by_site"
+author: "Nico Valencia"
+date: "2025-02-06"
+output: html_document
+---
+
+Goal of this script is to perform a  exact test, by site, for the made psychosis_merged phenotype here then graph it
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(forestplot)
+library(kableExtra)
+knitr::opts_chunk$set(echo = TRUE)
+
+data <- read.csv("~/work/khat_gwas/script_referenced_files/mary_tables_NeuroGAP.translated.patient.response.asof.09-21-23.csv")
+
+View(data)
+```
+
+```{r}
+
+# Ensure psychosis_merged is created before filtering
+data <- data %>%
+  mutate(psychosis_merged = case_when(
+    psychosis_primary %in% c("Bipolar", "Mania NOS") ~ "Bipolar",
+    psychosis_primary %in% c("Schizophrenia", "Psychotic Disorder NOS", "Schizoaffective Disorder") ~ "Schizophrenia",
+    TRUE ~ NA_character_
+  ))
+
+# Map hub_site to new hub_location names
+data <- data %>%
+  mutate(hub_location = case_when(
+    hub_site %in% c("Cape Town", "Walter Sisulu") ~ "South Africa/UCT",
+    hub_site == "Addis Ababa" ~ "Ethiopia",
+    hub_site == "Moi" ~ "Kenya: Moi",
+    hub_site == "KEMRI" ~ "Kenya: KEMRI",
+    hub_site == "Makerere" ~ "Uganda",
+    TRUE ~ hub_site  # Retain all other locations
+  ))
+
+# Define unique hub locations
+hub_locations <- unique(data$hub_location)
+
+# Define psychosis categories
+psychosis_categories <- c("Bipolar", "Schizophrenia") 
+
+# Initialize results dataframe for Fisher's test
+results <- data.frame(
+  Hub_Location = character(), 
+  Psychosis = character(), 
+  P_Value = numeric(), 
+  OR = numeric(), 
+  CI_Lower = numeric(), 
+  CI_Upper = numeric(), 
+  stringsAsFactors = FALSE
+)
+
+# Initialize contingency table dataframe
+contingency_summary <- data.frame(
+  Hub_Location = character(),
+  Psychosis = character(),
+  Status = character(),
+  No_Khat_Use = integer(),
+  Khat_Use = integer(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each hub location and psychosis category
+for (hub in hub_locations) {
+  for (psychosis in psychosis_categories) {
+    
+    # Subset data for the current hub location and filter out `other_psych_yn == 1` or NA
+    subset_data <- data %>% 
+      dplyr::filter(hub_location == hub, other_psych_yn == 0)  # Exclude NA and 1 in other_psych_yn
+    
+    # Skip if no data remains after filtering
+    if (nrow(subset_data) == 0 || !"psychosis_merged" %in% colnames(subset_data)) {
+      next
+    }
+
+    # Define cases and controls correctly
+    subset_data <- subset_data %>%
+      mutate(
+        psychosis_binary = case_when(
+          psychosis_merged == psychosis ~ "Case",  # Case = has the current psychosis
+          TRUE ~ "Control"  # Control = does not have the psychosis (other psychosis or NA)
+        ),
+        assist_khat_label = ifelse(assist_khat == 1, "Khat Use", "No Khat Use") # Label khat use
+      )
+
+    # Create contingency table
+    contingency_table <- table(subset_data$assist_khat_label, subset_data$psychosis_binary)
+    
+    # Save counts in contingency summary table
+    if (all(dim(contingency_table) == c(2,2))) {
+      contingency_summary <- rbind(contingency_summary, data.frame(
+        Hub_Location = hub,
+        Psychosis = psychosis,
+        Status = "Control",
+        No_Khat_Use = contingency_table["No Khat Use", "Control"],
+        Khat_Use = contingency_table["Khat Use", "Control"]
+      ))
+      
+      contingency_summary <- rbind(contingency_summary, data.frame(
+        Hub_Location = hub,
+        Psychosis = psychosis,
+        Status = "Case",
+        No_Khat_Use = contingency_table["No Khat Use", "Case"],
+        Khat_Use = contingency_table["Khat Use", "Case"]
+      ))
+      
+      # Perform Fisher's exact test
+      fisher_result <- fisher.test(contingency_table)
+      p_value <- fisher_result$p.value
+      OR <- fisher_result$estimate  # Odds ratio
+      CI_Lower <- fisher_result$conf.int[1]  # Lower bound of confidence interval
+      CI_Upper <- fisher_result$conf.int[2]  # Upper bound of confidence interval
+    } else {
+      p_value <- NA
+      OR <- NA
+      CI_Lower <- NA
+      CI_Upper <- NA
+    }
+    
+    # Store Fisher's test results
+    results <- rbind(results, data.frame(
+      Hub_Location = hub, 
+      Psychosis = psychosis, 
+      P_Value = p_value, 
+      OR = OR, 
+      CI_Lower = CI_Lower, 
+      CI_Upper = CI_Upper
+    ))
+  }
+}
+
+# Display contingency table
+kable(contingency_summary, caption = "Khat Use and Primary Psychosis Phenotypes") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+# Save contingency table as CSV
+write.csv(contingency_summary, "contingency_summary_filtered.csv", row.names = FALSE)
+
+# Filter out NAs from Fisher's test results
+results_filtered <- results %>% dplyr::filter(!is.na(OR))
+
+# Format hub-psychosis labels
+results_filtered <- results_filtered %>%
+  mutate(Label = paste(Hub_Location, Psychosis, sep = " - "))
+
+# Order labels for better visualization
+results_filtered$Label <- factor(results_filtered$Label, levels = results_filtered$Label[order(results_filtered$OR)])
+
+# Create the forest plot
+forest_plot <- ggplot(results_filtered, aes(x = Label, y = OR)) +
+  geom_point(size = 3) +  # Plot the OR point
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.2) +  # Add confidence intervals
+  scale_y_log10() +  # Log scale for odds ratio
+  coord_flip() +  # Flip axes for readability
+  theme_minimal() +
+  labs(title = "Khat Use and Primary Psychosis phenotypes",
+       x = "Hub Location - Psychosis Category", 
+       y = "Odds Ratio (Log Scale)") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red")  # Reference line at OR = 1
+
+# Save forest plot
+ggsave("forest_plot_filtered.png", forest_plot, width = 10, height = 6)
+
+# Display the forest plot
+print(forest_plot)
+
+```
+
+
+```{r}
+
+# Display OR and full p-values, ordered from highest to lowest OR
+results_filtered %>%
+  dplyr::select(Hub_Location, Psychosis, OR, P_Value) %>%
+  arrange(desc(OR)) %>%
+  kable(caption = "Odds Ratios and Full P-values for Khat Use by Psychosis and Hub Location (Ordered by OR)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+
+```
+
+```{r}
+# Print just the p-values for each disease at each site to console
+results_filtered %>%
+  dplyr::select(Hub_Location, Psychosis, P_Value) %>%
+  arrange(Psychosis, Hub_Location) %>%
+  print()
+
+```
+
+```{r}
+setwd("~/work/khat_gwas/phenotype_files")
+
+# Define function
+get_khat_use_percentage <- function(df, site_name) {
+  total <- sum(!is.na(df$assist_khat))
+  khat_users <- sum(df$assist_khat == 1, na.rm = TRUE)
+  percent <- (khat_users / total) * 100
+
+  cat(sprintf(
+    "%s: %.2f%% (n = %d of %d)\n",
+    site_name, percent, khat_users, total
+  ))
+}
+
+# Files and corresponding site names
+files <- c(
+  "AAU_khat_pheno.txt",
+  "KEMRI_khat_pheno.txt",
+  "Moi_khat_pheno.txt",
+  "UCT_khat_pheno.txt",
+  "Uganda_khat_pheno.txt"
+)
+
+sites <- c(
+  "AAU",
+  "KEMRI",
+  "Moi",
+  "UCT",
+  "Uganda"
+)
+
+# Read each file and calculate khat-use percentage
+for (i in seq_along(files)) {
+
+  df <- read.table(
+    files[i],
+    header = TRUE,
+    stringsAsFactors = FALSE
+  )
+
+  get_khat_use_percentage(df, sites[i])
+}
+
+```
+
+```{r}
+# Directory containing phenotype files
+dir_path <- "~/work/khat_gwas/phenotype_files"
+
+# File names
+files <- c(
+  "AAU_khat_pheno.txt",
+  "KEMRI_khat_pheno.txt",
+  "Moi_khat_pheno.txt",
+  "UCT_khat_pheno.txt",
+  "Uganda_khat_pheno.txt"
+)
+
+# Site names
+sites <- c(
+  "AAU",
+  "KEMRI",
+  "Moi",
+  "UCT",
+  "Uganda"
+)
+
+# Helper function
+print_khat_amt_distribution <- function(df, site_name) {
+  cat("\n---", site_name, "---\n")
+  print(table(df$assist_khat_amt, useNA = "ifany"))
+}
+
+# Read each file and print distribution
+for (i in seq_along(files)) {
+
+  df <- read.table(
+    file.path(dir_path, files[i]),
+    header = TRUE,
+    stringsAsFactors = FALSE
+  )
+
+  print_khat_amt_distribution(df, sites[i])
+}
+
+```

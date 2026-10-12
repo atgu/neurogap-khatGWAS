@@ -1,0 +1,266 @@
+---
+title: "stepX_locuszoomR"
+author: "Nico Matthew S. Valencia"
+date: "2026-08-07"
+output: html_document
+---
+
+```{r}
+# dependencies of locuszoomr
+#BiocManager::install(c(
+#  "AnnotationFilter",
+#  "ensembldb",
+#  "GenomicRanges",
+#  "AnnotationDbi",
+#  "EnsDb.Hsapiens.v86"
+#))
+
+```
+
+```{r}
+setwd("/Users/nico/work/khat_gwas/clumping/a2_effect")
+
+library(data.table)
+library(locuszoomr)
+library(EnsDb.Hsapiens.v86)
+library(ggplot2)
+```
+```{r}
+#### Paths
+
+indir <- "/Users/nico/work/khat_gwas/clumping"
+
+pdf_dir <- file.path(indir, "locuszoom_pdf")
+png_dir <- file.path(indir, "locuszoom_png")
+
+dir.create(pdf_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(png_dir, showWarnings = FALSE, recursive = TRUE)
+
+
+
+#### Locate all LD-annotated files
+
+
+files <- list.files(
+  path = indir,
+  pattern = "_ld_annotated\\.txt$",
+  full.names = TRUE
+)
+
+cat("Found", length(files), "regional files\n")
+
+basename(files)
+```
+
+```{r}
+make_locus <- function(file) {
+
+  fname <- basename(file)
+
+  # Extract phenotype: ku or kuf
+  phenotype <- sub(
+    "^([^_]+)_.*$",
+    "\\1",
+    fname
+  )
+
+  # Extract lead SNP
+  lead_snp <- sub(
+    "^(ku|kuf)_(rs[0-9]+)_.*$",
+    "\\2",
+    fname
+  )
+
+  # Human-readable phenotype
+  phenotype_label <- if (phenotype == "ku") {
+    "Khat Use"
+  } else if (phenotype == "kuf") {
+    "Khat Use Frequency"
+  } else {
+    toupper(phenotype)
+  }
+
+  # Read regional GWAS data
+  dat <- fread(file)
+
+  # Lead SNP row
+  lead_row <- dat[
+    MarkerName == lead_snp
+  ]
+
+  if (nrow(lead_row) == 0) {
+    stop("Lead SNP not found: ", lead_snp)
+  }
+
+  chr <- lead_row$CHR[1]
+
+  # Construct locus
+  loc <- locus(
+    data = dat,
+    index_snp = lead_snp,
+    fix_window = 1e6,
+    chrom = "CHR",
+    pos = "BP",
+    labs = "MarkerName",
+    p = "P-value",
+    LD = "r2",
+    ens_db = "EnsDb.Hsapiens.v86"
+  )
+
+  # Store convenient metadata
+  attr(loc, "phenotype") <- phenotype
+  attr(loc, "phenotype_label") <- phenotype_label
+  attr(loc, "lead_snp") <- lead_snp
+  attr(loc, "chr") <- chr
+
+  return(loc)
+}
+```
+
+```{r}
+# plot testing w/out recombination peaks
+test_file <- files[
+  grepl("ku_rs189679719_", basename(files))
+]
+
+test_loc <- make_locus(test_file)
+
+summary(test_loc)
+
+locus_plot(
+  test_loc,
+  labels = "index"
+)
+```
+```{r}
+test_loc_recomb <- link_recomb(test_loc)
+
+locus_plot(
+  test_loc_recomb,
+  labels = "index"
+)
+```
+```{r}
+# object w/ all loci
+loci <- lapply(
+  files,
+  make_locus
+)
+
+names(loci) <- basename(files)
+
+length(loci)
+```
+```{r}
+# apply recombination rate to all loci
+loci_recomb <- lapply(
+  seq_along(loci),
+  function(i) {
+
+    cat(
+      "Adding recombination:",
+      i,
+      "/",
+      length(loci),
+      "\n"
+    )
+
+    link_recomb(
+      loci[[i]]
+    )
+  }
+)
+
+names(loci_recomb) <- names(loci)
+```
+
+```{r}
+# plot all loci w/ recombination rates
+
+
+for (i in seq_along(loci_recomb)) {
+
+  loc <- loci_recomb[[i]]
+
+  phenotype_label <- attr(loc, "phenotype_label")
+  lead_snp <- attr(loc, "lead_snp")
+  chr <- attr(loc, "chr")
+
+  p <- locus_ggplot(
+    loc,
+    labels = "index",
+    nudge_y = 1.0,
+    recomb_col = "goldenrod"
+  ) +
+    labs(
+      title = paste0(
+        phenotype_label,
+        ": ",
+        lead_snp,
+        " — Chromosome ",
+        chr,
+        "+/- 500kb"
+      )
+    ) +
+    theme(
+      plot.title = element_text(
+        hjust = 0.5,
+        face = "bold",
+        size = 14,
+        margin = margin(b = 15)
+      )
+    )
+
+  print(p)
+}
+```
+```{r}
+# make plot w/out legend
+for (i in seq_along(loci_recomb)) {
+
+  loc <- loci_recomb[[i]]
+
+  phenotype_label <- attr(loc, "phenotype_label")
+  lead_snp <- attr(loc, "lead_snp")
+  chr <- attr(loc, "chr")
+
+  p <- locus_ggplot(
+    loc,
+    labels = "index",
+    nudge_y = 1.5,
+    recomb_col = "goldenrod",
+    legend_pos = NULL
+  ) +
+    labs(
+      title = paste0(
+        phenotype_label,
+        ": ",
+        lead_snp,
+        " (+/-500kb) — Chromosome ",
+        chr
+      )
+    ) +
+    theme(
+      plot.title = element_text(
+        hjust = 0.5,
+        face = "bold",
+        size = 14,
+        margin = margin(b = 15)
+      )
+    )
+
+  print(p)
+}
+```
+```{r}
+# make plot with legend
+legend_loc<- loci_recomb[[1]]
+
+p_legend_source <- locus_ggplot(
+  legend_loc,
+  labels = NULL,
+  recomb_col = "goldenrod"
+)
+
+p_legend_source
+```
