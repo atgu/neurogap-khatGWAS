@@ -5,17 +5,12 @@ output: html_document
 ---
 
 You can refer here to how my files looked when I sent it to google cloud:
-gs://neurogap-bge-imputed-regional/nico/sud-gwas/rsid_match
-If you just download like from "gsutil cp gs://neurogap-bge-imputed-regional/nico/sud-gwas/rsid_match"
-you'll have the same structure
-
+gs://neurogap-bge-imputed-regional/nico/sud-gwas/rsid_match/a2_effect/*/a2_effect
 
 ### Manipulating data and plotting positive betas only
   # i.e., if beta ku/kuf = neg. value, multiply beta ku/kuf and beta other sumstat by -1
 
 ```{r}
-
-#install.packages("ggplot2")
 
 library(ggplot2)
 library(dplyr)
@@ -240,7 +235,7 @@ add_comparison_summary <- function(
 
 ```{r}
 # Hatoum: list all harmonized pairwise files
-data_dir <- "/Users/nico/work/sud/hatoum_lifted_harmonized"
+data_dir <- "/Users/nico/work/sud/hatoum_lifted_harmonized/a2_effect"
 
 files <- list.files(
   path = data_dir,
@@ -272,13 +267,27 @@ for (file in files) {
 
   cat("\nProcessing:", basename(file), "\n")
 
+  khat_beta <- if (grepl("^ku_", basename(file))) "beta_ku" else "beta_kuf"
+  khat_p <- if (grepl("^ku_", basename(file))) "p_ku" else "p_kuf"
+
+  # Read by position because the KU file's generated header omits the P
+  # column name even though the p-value is present in every data row.
   dat <- read.table(
     file,
-    header = TRUE,
+    header = FALSE,
     sep = "\t",
+    skip = 1,
     fill = TRUE,
     stringsAsFactors = FALSE,
-    check.names = FALSE
+    check.names = FALSE,
+    col.names = c(
+      "khat_marker", "CHR", "BP", "khat_A1", "khat_A2",
+      khat_beta, khat_p, "hatoum_marker",
+      "hatoum_effect_allele_A1", "hatoum_other_allele_A2",
+      "beta_Hatoum2023AddictionEuropean",
+      "beta_Hatoum2023AddictionEuropean_to_khat_A1",
+      "P", "allele_match_status"
+    )
   )
 
 
@@ -888,7 +897,7 @@ for (pair_name in names(hatoum_lead_data)) {
 ```{r}
 # Johnson: setup, subset to lead SNPs, and calculate KU/KUF SE
 
-data_dir <- "/Users/nico/work/sud/johnson_lifted_harmonized"
+data_dir <- "/Users/nico/work/sud/johnson_lifted_harmonized/a2_effect"
 
 ku_sug_thresh <- 1e-5
 
@@ -936,6 +945,8 @@ for (file in files) {
   }
 
 
+  # Read by position because some generated headers may contain two
+  # accidentally concatenated names, while the data rows remain complete.
   dat <- read.table(
     file,
     header = FALSE,
@@ -943,6 +954,7 @@ for (file in files) {
     skip = 1,
     fill = TRUE,
     stringsAsFactors = FALSE,
+    check.names = FALSE,
     col.names = c(
       "khat_marker",
       "CHR",
@@ -954,14 +966,15 @@ for (file in files) {
       "johnson_marker",
       "johnson_A1",
       "johnson_A2",
+      "johnson_effect_type",
       "beta_CUD_EUR_casecontrol",
       "beta_CUD_EUR_casecontrol_to_khat_A1",
       "P",
-      "allele_match_status",
       "SE",
       "N",
       "N_CAS",
-      "N_CON"
+      "N_CON",
+      "allele_match_status"
     )
   )
 
@@ -1532,7 +1545,7 @@ for (pair_name in names(johnson_lead_data)) {
 ```{r}
 # Levey: subset to lead SNPs and prepare SEs
 
-data_dir <- "/Users/nico/work/sud/levey_lifted_harmonized"
+data_dir <- "/Users/nico/work/sud/levey_lifted_harmonized/a2_effect"
 
 ku_sug_thresh <- 1e-5
 
@@ -2479,7 +2492,7 @@ liu_drinks_per_week_lead <- c(
 ```{r}
 # Liu: subset to phenotype-specific lead SNPs and reconstruct SEs
 
-data_dir <- "/Users/nico/work/sud/liu_lifted_harmonized"
+data_dir <- "/Users/nico/work/sud/liu_lifted_harmonized/a2_effect"
 
 ku_sug_thresh <- 1e-5
 
@@ -4323,11 +4336,16 @@ saunders_drnkwk_amr_lead <- c(
 
 
 # Saunders input files
-saunders_dir <- "/Users/nico/work/sud/saunders_lifted_harmonized"
+saunders_dir <- "/Users/nico/work/sud/saunders_lifted_harmonized/a2_effect"
 
 files <- list.files(
   path = saunders_dir,
-  pattern = "^(ku|kuf)_(AgeSmk|CigDay|DrnkWk|SmkCes|SmkInit)_(AFR|AMR|EAS|EUR)_harmonized\\.txt$",
+  pattern = paste0(
+    "^(ku|kuf)_GSCAN_",
+    "(AgeSmk|CigDay|DrnkWk|SmkCes|SmkInit)_",
+    "2022_GWAS_SUMMARY_STATS_",
+    "(AFR|AMR|EAS|EUR)_harmonized\\.txt$"
+  ),
   full.names = TRUE
 )
 
@@ -4723,7 +4741,7 @@ for (file in files) {
   } else {
 
     y_p_candidates <- grep(
-      "^p$|^pval$|^p_value$|^pvalue$|pval|p_value|pvalue",
+      "^p$|_p$|pval|p_value|pvalue",
       names(dat),
       value = TRUE,
       ignore.case = TRUE
@@ -4749,7 +4767,7 @@ for (file in files) {
   
   # Exclude columns that appear to belong to KU/KUF.
   y_se_candidates <- grep(
-    "^SE$|^se$|stderr|std_err|standard_error",
+    "^SE$|_SE$|stderr|std_err|standard_error",
     names(dat),
     value = TRUE,
     ignore.case = TRUE
@@ -4797,13 +4815,18 @@ for (file in files) {
 
   # Parse filename
   
-  # Expected:
-  # ku_AgeSmk_AFR_harmonized.txt
-  # kuf_SmkInit_EUR_harmonized.txt
+  # Expected examples:
+  # ku_GSCAN_AgeSmk_2022_GWAS_SUMMARY_STATS_AFR_harmonized.txt
+  # kuf_GSCAN_SmkInit_2022_GWAS_SUMMARY_STATS_EUR_harmonized.txt
   file_name <- basename(file)
 
   filename_match <- regexec(
-    pattern = "^(ku|kuf)_(AgeSmk|CigDay|DrnkWk|SmkCes|SmkInit)_(AFR|AMR|EAS|EUR)_harmonized\\.txt$",
+    pattern = paste0(
+      "^(ku|kuf)_GSCAN_",
+      "(AgeSmk|CigDay|DrnkWk|SmkCes|SmkInit)_",
+      "2022_GWAS_SUMMARY_STATS_",
+      "(AFR|AMR|EAS|EUR)_harmonized\\.txt$"
+    ),
     text = file_name
   )
 
@@ -5404,7 +5427,7 @@ for (file in files) {
         saunders_label = saunders_label,
         saunders_n_label = saunders_n_label,
         saunders_se_source = saunders_se_source,
-        filter_label = "with P < 0.05"
+        filter_label = "with KU/KUF P < 0.05"
       )
     }
   }
@@ -5439,11 +5462,14 @@ walters_lead <- c("rs7644567", "rs2066702", "rs1229984","rs1789912", "rs6827898"
 
 
 # Walters input files
-walters_dir <- "/Users/nico/work/sud/walters_lifted_harmonized"
+walters_dir <- "/Users/nico/work/sud/walters_lifted_harmonized/a2_effect"
 
 files <- list.files(
   path = walters_dir,
-  pattern = "^(ku|kuf)_pgc_alcdep_trans_fe_unrel_geno_harmonized\\.txt$",
+  pattern = paste0(
+    "^(ku|kuf)_pgc_alcdep\\.trans_fe_unrel_geno\\.",
+    "aug2018_release_harmonized\\.txt$"
+  ),
   full.names = TRUE
 )
 
@@ -5475,15 +5501,30 @@ for (file in files) {
   cat("\nProcessing:", basename(file), "\n")
 
 
+  khat_beta <- if (grepl("^ku_", basename(file))) "beta_ku" else "beta_kuf"
+  khat_p <- if (grepl("^ku_", basename(file))) "p_ku" else "p_kuf"
+
+  # Read by position because the KUF header concatenates walters_Neff and
+  # walters_Weight, while the corresponding data fields remain separate.
   dat <- read.table(
     file,
-    header = TRUE,
+    header = FALSE,
     sep = "\t",
+    skip = 1,
     fill = TRUE,
     stringsAsFactors = FALSE,
     check.names = FALSE,
     quote = "",
-    comment.char = ""
+    comment.char = "",
+    col.names = c(
+      "khat_marker", "CHR", "BP", "khat_A1", "khat_A2",
+      khat_beta, khat_p, "walters_marker",
+      "walters_effect_allele_A1", "walters_other_allele_A2",
+      "walters_effect_type", "walters_effect_raw",
+      "walters_effect_to_khat_A1", "walters_logOR_to_khat_A1",
+      "walters_P", "walters_INFO", "walters_SE", "walters_Neff",
+      "walters_Weight", "allele_match_status"
+    )
   )
 
 
@@ -5495,7 +5536,7 @@ for (file in files) {
   )
 
   y_beta <- grep(
-    "_to_khat_A1$",
+    "^walters_effect_to_khat_A1$",
     names(dat),
     value = TRUE
   )
@@ -5554,7 +5595,7 @@ for (file in files) {
   } else {
 
     y_p_candidates <- grep(
-      "^p$|^pval$|^p_value$|^pvalue$|pval|p_value|pvalue",
+      "^p$|_p$|pval|p_value|pvalue",
       names(dat),
       value = TRUE,
       ignore.case = TRUE
@@ -5580,7 +5621,7 @@ for (file in files) {
   
   # Exclude any SE column that appears to belong to KU/KUF.
   y_se_candidates <- grep(
-    "^SE$|^se$|stderr|std_err|standard_error",
+    "^SE$|_SE$|stderr|std_err|standard_error",
     names(dat),
     value = TRUE,
     ignore.case = TRUE
@@ -5993,7 +6034,7 @@ for (file in files) {
   )
 
   cat(
-    "Lead SNPs highlighted at P < ",
+    "Lead SNPs highlighted at KU/KUF P < ",
     ku_sug_thresh,
     ": ",
     sum(plot_dat$highlight, na.rm = TRUE),
@@ -6283,7 +6324,7 @@ for (file in files) {
 # beta or SE. Those comparisons are therefore plotted as signed Z-score vs
 # signed Z-score and are not added to the beta/Deming comparison_summary.
 
-bright_data_dir <- "/Users/nico/work/sud/bright_harmonized"
+bright_data_dir <- "/Users/nico/work/sud/bright_harmonized/a2_effect"
 
 ku_sug_thresh <- 1e-5
 
@@ -6378,7 +6419,7 @@ bright_cross_data <- list()
 # Bright CanLU: setup and prepare lead-SNP datasets
 
 
-data_dir <- "/Users/nico/work/sud/bright_harmonized"
+data_dir <- "/Users/nico/work/sud/bright_harmonized/a2_effect"
 
 ku_sug_thresh <- 1e-5
 
@@ -7015,98 +7056,6 @@ for (pair_name in names(bright_eur_data)) {
 
 
 ### Comparison summary table
-```{r}
-# Add Liu Smoking Initiation KU/KUF P < 0.05 comparisons
-# to the end of comparison_summary
-
-smkinit_names <- names(liu_lead_data)[
-  grepl(
-    "SmokingInitiation",
-    names(liu_lead_data),
-    fixed = TRUE
-  )
-]
-
-for (pair_name in smkinit_names) {
-
-  plot_dat <- liu_lead_data[[pair_name]]
-
-  # Retrieve stored column names
-  x_beta <- attr(plot_dat, "x_beta")
-  x_p <- attr(plot_dat, "x_p")
-  y_beta <- attr(plot_dat, "y_beta")
-
-  # Identify KU versus KUF
-  if (grepl("^ku_", pair_name)) {
-
-    khat_trait <- "Khat Use"
-    filter_label <- "KU pval < 0.05"
-
-  } else {
-
-    khat_trait <- "Khat Use Frequency"
-    filter_label <- "KUF pval < 0.05"
-  }
-
-  # Keep the same complete rows used in the Liu plots,
-  # additionally requiring KU/KUF P < 0.05
-  plot_dat <- plot_dat[
-    !is.na(plot_dat[[x_beta]]) &
-      !is.na(plot_dat[[y_beta]]) &
-      !is.na(plot_dat[[x_p]]) &
-      !is.na(plot_dat$se_khat) &
-      !is.na(plot_dat$se_liu) &
-      is.finite(plot_dat[[x_beta]]) &
-      is.finite(plot_dat[[y_beta]]) &
-      is.finite(plot_dat[[x_p]]) &
-      is.finite(plot_dat$se_khat) &
-      is.finite(plot_dat$se_liu) &
-      plot_dat[[x_p]] > 0 &
-      plot_dat[[x_p]] < 0.05 &
-      plot_dat$se_khat >= 0 &
-      plot_dat$se_liu >= 0,
-    ,
-    drop = FALSE
-  ]
-
-  if (nrow(plot_dat) == 0) {
-    next
-  }
-
-  # Use the same positive-KU/KUF orientation as the Liu plots
-  flip_rows <- plot_dat[[x_beta]] < 0
-
-  plot_dat[[x_beta]][flip_rows] <-
-    -plot_dat[[x_beta]][flip_rows]
-
-  plot_dat[[y_beta]][flip_rows] <-
-    -plot_dat[[y_beta]][flip_rows]
-
-  # Recalculate Deming regression for the filtered comparison
-  deming_results <- get_deming_results(
-    plot_dat = plot_dat,
-    x_beta = x_beta,
-    y_beta = y_beta,
-    x_se = "se_khat",
-    y_se = "se_liu"
-  )
-
-  # Append the filtered comparison row
-  add_comparison_summary(
-    plot_dat = plot_dat,
-    x_beta = x_beta,
-    y_beta = y_beta,
-    x_p = x_p,
-    khat_trait = khat_trait,
-    comparison_label = paste0(
-      "Liu Smoking Initiation | ",
-      filter_label
-    ),
-    deming_results = deming_results
-  )
-}
-```
-
 
 ```{r}
 # Final table containing one row per primary comparison.
